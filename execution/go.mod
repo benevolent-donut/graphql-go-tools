@@ -1,4 +1,4 @@
-module github.com/wundergraph/graphql-go-tools/execution
+module github.com/benevolent-donut/graphql-go-tools/execution
 
 go 1.25
 
