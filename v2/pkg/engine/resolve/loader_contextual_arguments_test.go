@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -678,6 +679,85 @@ func (f *failingContextualDataSource) Load(ctx context.Context, headers http.Hea
 		return nil, errors.New("subgraph unavailable")
 	}
 	return data, err
+}
+
+// blockingContextualDataSource reports every request on arrived and answers it only with the error of its canceled context.
+type blockingContextualDataSource struct {
+	arrived chan struct{}
+}
+
+func (d *blockingContextualDataSource) Load(ctx context.Context, _ http.Header, _ []byte) ([]byte, error) {
+	d.arrived <- struct{}{}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (d *blockingContextualDataSource) LoadWithFiles(ctx context.Context, headers http.Header, input []byte, _ []*httpclient.FileUpload) ([]byte, error) {
+	return d.Load(ctx, headers, input)
+}
+
+func TestContextualArgumentCancellation(t *testing.T) {
+	t.Run("groups that have not started when the operation is canceled are not sent and are reported once", func(t *testing.T) {
+		const groups = maxConcurrentContextualArgumentGroupLoads + 4
+		values := make([]string, groups)
+		for i := range values {
+			values[i] = strconv.Itoa(i)
+		}
+		users := &blockingContextualDataSource{arrived: make(chan struct{}, groups)}
+		var loads, finishes atomic.Int64
+		operation, cancel := context.WithCancel(t.Context())
+		ctx := NewContext(operation)
+		ctx.SetEngineLoaderHooks(&spyLoaderHooks{
+			onLoad: func(ctx context.Context, _ DataSourceInfo) context.Context {
+				loads.Add(1)
+				return ctx
+			},
+			onFinished: func(context.Context, DataSourceInfo, *ResponseInfo) { finishes.Add(1) },
+		})
+		done := make(chan string, 1)
+		go func() {
+			done <- loadContextual(t, ctx, contextualQueuesWithValues(values...), flaggedUsersFetch(contextualUsersFetch(1, users, queueContextualCapture)))
+		}()
+
+		for range maxConcurrentContextualArgumentGroupLoads {
+			<-users.arrived
+		}
+		cancel()
+		var out string
+		select {
+		case out = <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the loader did not return after the cancellation")
+		}
+
+		assert.Empty(t, users.arrived, "no group starts after the cancellation")
+		assert.Equal(t, int64(maxConcurrentContextualArgumentGroupLoads), loads.Load())
+		assert.Equal(t, int64(maxConcurrentContextualArgumentGroupLoads), finishes.Load())
+		assert.Equal(t, maxConcurrentContextualArgumentGroupLoads, strings.Count(out, `{"message":"Failed to fetch from Subgraph 'users' at Path 'moderationQueues.@.flaggedUsers'."}`))
+		assert.Equal(t, maxConcurrentContextualArgumentGroupLoads+1, strings.Count(out, `"message"`))
+		assert.Contains(t, out, `Reason: 4 requests for distinct contextual argument values were not sent because the operation was canceled or timed out.`)
+	})
+
+	t.Run("an operation canceled before its groups start sends none and skips the dependents", func(t *testing.T) {
+		users := newContextualUsersDataSource("contextualArgument_0")
+		dependent := newContextualUsersDataSource()
+		dependentFetch := contextualUsersFetch(2, dependent)
+		dependentFetch.DependsOnFetchIDs = []int{1}
+		operation, cancel := context.WithCancel(t.Context())
+		cancel()
+		ctx := NewContext(operation)
+
+		out := loadContextual(t, ctx, contextualQueuesWithValues("1", "2", "3"), Sequence(
+			flaggedUsersFetch(contextualUsersFetch(1, users, queueContextualCapture)),
+			flaggedUsersFetch(dependentFetch),
+		))
+
+		assert.Empty(t, users.recordedRequests())
+		assert.Empty(t, dependent.recordedRequests())
+		assert.Equal(t, `{"errors":[{"message":"Failed to fetch from Subgraph 'users' at Path 'moderationQueues.@.flaggedUsers', Reason: 3 requests for distinct contextual argument values were not sent because the operation was canceled or timed out."}],`+
+			`"data":`+contextualQueuesWithValues("1", "2", "3")+`}`, out)
+		assert.ErrorIs(t, ctx.SubgraphErrors(), context.Canceled)
+	})
 }
 
 func TestContextualArgumentHooksAndTraces(t *testing.T) {

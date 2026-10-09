@@ -23,6 +23,8 @@ const (
 const (
 	contextualArgumentGroupLimitExceeded = "the entities need %d requests for distinct contextual argument values, which exceeds the limit of %d"
 	contextualArgumentValueMissing       = "%d entities were not fetched because the context value of their '%s' ancestor is missing"
+	contextualArgumentGroupsNotSent      = "%d requests for distinct contextual argument values were not sent because the operation was canceled or timed out"
+	contextualArgumentGroupsNotSentOne   = "1 request for distinct contextual argument values was not sent because the operation was canceled or timed out"
 )
 
 // fetchContextualArguments returns the contextual argument captures of an entity fetch.
@@ -213,6 +215,16 @@ func (l *Loader) loadContextualArgumentGroups(ctx context.Context, prepared *pre
 	g.SetLimit(maxConcurrentContextualArgumentGroupLoads)
 	for _, group := range groups {
 		g.Go(func() error {
+			// A group that has not started when the operation is canceled is not sent, so it calls no hooks.
+			if err := ctx.Err(); err != nil {
+				group.skipLoad = true
+				group.res.err = err
+				if group.trace != nil {
+					group.trace.LoadSkipped = true
+					l.setTracingInput(group.item, group.input, group.trace)
+				}
+				return nil
+			}
 			return l.loadPhase(ctx, group)
 		})
 	}
@@ -222,7 +234,14 @@ func (l *Loader) loadContextualArgumentGroups(ctx context.Context, prepared *pre
 // mergeContextualArgumentGroups merges the response of each group into its items, in group order, under the data lock.
 func (l *Loader) mergeContextualArgumentGroups(prepared *preparedFetch) error {
 	var firstErr error
+	var notSent int
+	var notSentErr error
 	for _, group := range prepared.groups.fetches {
+		if group.skipLoad {
+			notSent++
+			notSentErr = group.res.err
+			continue
+		}
 		if err := l.responseCacheCollect(group); err != nil {
 			l.reportResponseCacheError(ResponseCacheOperationCollect, group.res.ds.Name, fmt.Errorf("response cache collect error: %w", err))
 		}
@@ -235,6 +254,18 @@ func (l *Loader) mergeContextualArgumentGroups(prepared *preparedFetch) error {
 			firstErr = err
 		}
 		l.callOnFinished(group.res)
+	}
+	if notSent != 0 {
+		l.recordErroredFetchIDLocked(prepared.item)
+		reason := contextualArgumentGroupsNotSentOne
+		if notSent > 1 {
+			reason = fmt.Sprintf(contextualArgumentGroupsNotSent, notSent)
+		}
+		// The cause stays on the recorded subgraph error, so a canceled operation is not mistaken for a failing subgraph.
+		err := l.renderErrorsFailedToFetch(prepared.item, &result{ds: prepared.res.ds, err: notSentErr}, reason)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	return firstErr
 }
