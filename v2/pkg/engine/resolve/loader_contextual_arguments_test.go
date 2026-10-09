@@ -941,8 +941,8 @@ func TestContextualArgumentHooksAndTraces(t *testing.T) {
 }
 
 func TestContextualArgumentTraces(t *testing.T) {
-	tracingContext := func(t *testing.T) *Context {
-		ctx := NewContext(t.Context())
+	tracingContext := func(operation context.Context) *Context {
+		ctx := NewContext(operation)
 		ctx.TracingOptions = TraceOptions{Enable: true, ExcludeLoadStats: true, EnablePredictableDebugTimings: true}
 		return ctx
 	}
@@ -954,7 +954,7 @@ func TestContextualArgumentTraces(t *testing.T) {
 			`{"__context_0":true,"flaggedUsers":[{"__typename":"User","id":"u1"}]},` +
 			`{"flaggedUsers":[{"__typename":"User","id":"u2"}]}]}`
 
-		loadContextual(t, tracingContext(t), data, flaggedUsersFetch(fetch))
+		loadContextual(t, tracingContext(t.Context()), data, flaggedUsersFetch(fetch))
 
 		assert.Len(t, users.recordedRequests(), 1)
 		require.NotNil(t, fetch.Trace)
@@ -969,7 +969,7 @@ func TestContextualArgumentTraces(t *testing.T) {
 		loader := newContextualLoader(contextualQueuesWithValues("1", "2", "3"))
 		loader.maxContextualArgumentGroups = 2
 
-		runContextualLoader(t, loader, tracingContext(t), flaggedUsersFetch(fetch))
+		runContextualLoader(t, loader, tracingContext(t.Context()), flaggedUsersFetch(fetch))
 
 		assert.Empty(t, users.recordedRequests())
 		require.NotNil(t, fetch.Trace)
@@ -983,13 +983,42 @@ func TestContextualArgumentTraces(t *testing.T) {
 		users := newContextualUsersDataSource("contextualArgument_0")
 		fetch := contextualUsersFetch(1, users, queueContextualCapture)
 
-		out := loadContextual(t, tracingContext(t), `{"moderationQueues":[{"flaggedUsers":[{"__typename":"User","id":"u1"}]}]}`, flaggedUsersFetch(fetch))
+		out := loadContextual(t, tracingContext(t.Context()), `{"moderationQueues":[{"flaggedUsers":[{"__typename":"User","id":"u1"}]}]}`, flaggedUsersFetch(fetch))
 
 		assert.Empty(t, users.recordedRequests())
 		assert.Contains(t, out, `Reason: 1 entity was not fetched because the context value of its 'ModerationQueue' ancestor is missing.`)
 		require.NotNil(t, fetch.Trace)
 		assert.True(t, fetch.Trace.LoadSkipped)
 		assert.JSONEq(t, `{"__typename":"User","id":"u1"}`, string(fetch.Trace.RawInputData))
+	})
+
+	t.Run("an entity fetch whose value is missing traces its entity as skipped", func(t *testing.T) {
+		users := newContextualUsersDataSource("contextualArgument_0")
+		fetch := contextualUserEntityFetch(users)
+
+		loadContextual(t, tracingContext(t.Context()), `{"moderationQueue":{"owner":{"__typename":"User","id":"u1"}}}`, queueOwnerFetch(fetch))
+
+		assert.Empty(t, users.recordedRequests())
+		require.NotNil(t, fetch.Trace)
+		assert.True(t, fetch.Trace.LoadSkipped)
+		assert.JSONEq(t, `{"__typename":"User","id":"u1"}`, string(fetch.Trace.RawInputData))
+	})
+
+	t.Run("groups that a canceled operation does not send are traced as skipped", func(t *testing.T) {
+		users := newContextualUsersDataSource("contextualArgument_0")
+		fetch := contextualUsersFetch(1, users, queueContextualCapture)
+		operation, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		loadContextual(t, tracingContext(operation), contextualQueuesWithValues("1", "2"), flaggedUsersFetch(fetch))
+
+		assert.Empty(t, users.recordedRequests())
+		require.Len(t, fetch.Traces, 2)
+		for i, trace := range fetch.Traces {
+			assert.True(t, trace.LoadSkipped)
+			assert.Equal(t, "moderationQueues.@.flaggedUsers", trace.Path)
+			assert.Contains(t, string(trace.Input), `"contextualArgument_0":`+strconv.Itoa(i+1))
+		}
 	})
 }
 
