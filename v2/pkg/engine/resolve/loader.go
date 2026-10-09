@@ -1977,13 +1977,7 @@ func (l *Loader) prepareBatchEntityFetch(fetchItem *FetchItem, fetch *BatchEntit
 // with the contextual argument values of their group, or nil values for a fetch without contextual arguments.
 func (l *Loader) prepareBatchEntityFetchGroup(fetchItem *FetchItem, fetch *BatchEntityFetch, items []*astjson.Value, spans []batchItemSpan, values *ContextualArgumentValues, res *result, prepared *preparedFetch) error {
 	if l.ctx.TracingOptions.Enable {
-		fetch.Trace = &DataSourceLoadTrace{}
-		if !l.ctx.TracingOptions.ExcludeRawInputData && len(items) != 0 {
-			data := l.itemsData(items)
-			if data != nil {
-				fetch.Trace.RawInputData, _ = l.compactJSON(data.MarshalTo(nil))
-			}
-		}
+		fetch.Trace = l.newItemsTrace(items, spans)
 	}
 
 	fetchInput, err := l.renderBatchEntityInput(fetch, items, spans, values, res.tools, res, prepared, fetch.Trace)
@@ -2015,6 +2009,25 @@ func (l *Loader) prepareBatchEntityFetchGroup(fetchItem *FetchItem, fetch *Batch
 // batchItemSpan is the range [start, end) of the items of a batch entity fetch.
 type batchItemSpan struct {
 	start, end int
+}
+
+// newItemsTrace starts the trace of a request for the items of spans, every item when spans is nil.
+func (l *Loader) newItemsTrace(items []*astjson.Value, spans []batchItemSpan) *DataSourceLoadTrace {
+	trace := &DataSourceLoadTrace{}
+	if l.ctx.TracingOptions.ExcludeRawInputData || len(items) == 0 {
+		return trace
+	}
+	if spans != nil {
+		var spanItems []*astjson.Value
+		for _, span := range spans {
+			spanItems = append(spanItems, items[span.start:span.end]...)
+		}
+		items = spanItems
+	}
+	if data := l.itemsData(items); data != nil {
+		trace.RawInputData, _ = l.compactJSON(data.MarshalTo(nil))
+	}
+	return trace
 }
 
 // renderBatchEntityInput renders the request for the items of spans, every item when spans is nil, on the arena of tools.

@@ -74,13 +74,13 @@ func (l *Loader) prepareContextualArgumentFetch(fetchItem *FetchItem, captures [
 		l.recordErroredFetchIDLocked(fetchItem)
 		res.fetchSkipped = true
 		prepared.skipLoad = true
-		l.traceSkippedContextualArgumentFetch(fetchItem)
+		l.traceSkippedContextualArgumentFetch(fetchItem, items)
 		return prepared, l.renderContextualArgumentError(fetchItem, res, fmt.Sprintf(contextualArgumentGroupLimitExceeded, len(groups), limit))
 	}
 	if len(groups) == 0 {
 		res.fetchSkipped = true
 		prepared.skipLoad = true
-		l.traceSkippedContextualArgumentFetch(fetchItem)
+		l.traceSkippedContextualArgumentFetch(fetchItem, items)
 		return prepared, nil
 	}
 
@@ -123,7 +123,7 @@ func (l *Loader) prepareContextualArgumentGroups(fetchItem *FetchItem, fetch *Ba
 		groupRes.copyForSharedTargets = fetch.DeepCopyForSharedTargets
 		group := &preparedFetch{item: fetchItem, items: items, res: groupRes, batchFetch: true}
 		if tracing {
-			group.trace = l.contextualArgumentGroupTrace(items, groups[i].spans)
+			group.trace = l.newItemsTrace(items, groups[i].spans)
 			traces = append(traces, group.trace)
 		}
 
@@ -171,27 +171,14 @@ func (l *Loader) prepareContextualArgumentGroups(fetchItem *FetchItem, fetch *Ba
 	return nil
 }
 
-func (l *Loader) contextualArgumentGroupTrace(items []*astjson.Value, spans []batchItemSpan) *DataSourceLoadTrace {
-	trace := &DataSourceLoadTrace{}
-	if l.ctx.TracingOptions.ExcludeRawInputData {
-		return trace
-	}
-	var groupItems []*astjson.Value
-	for _, span := range spans {
-		groupItems = append(groupItems, items[span.start:span.end]...)
-	}
-	if data := l.itemsData(groupItems); data != nil {
-		trace.RawInputData, _ = l.compactJSON(data.MarshalTo(nil))
-	}
-	return trace
-}
-
-// traceSkippedContextualArgumentFetch records the trace of a contextual fetch that sends no request.
-func (l *Loader) traceSkippedContextualArgumentFetch(fetchItem *FetchItem) {
+// traceSkippedContextualArgumentFetch records the trace of a contextual fetch that sends no request for its items.
+func (l *Loader) traceSkippedContextualArgumentFetch(fetchItem *FetchItem, items []*astjson.Value) {
 	if !l.ctx.TracingOptions.Enable {
 		return
 	}
-	trace := &DataSourceLoadTrace{LoadSkipped: true, Path: fetchItem.ResponsePath}
+	trace := l.newItemsTrace(items, nil)
+	trace.LoadSkipped = true
+	trace.Path = fetchItem.ResponsePath
 	switch fetch := fetchItem.Fetch.(type) {
 	case *EntityFetch:
 		fetch.Trace = trace
