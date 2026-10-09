@@ -309,7 +309,7 @@ func (p *Processor) Process(pre plan.Plan) {
 		p.fetchTreeProcessors.processOrganizedFetchTree(t.Response.Fetches)
 
 	case *plan.DeferResponsePlan:
-		p.responseTreeProcessors.mergeFields.Process(t.Response.Response.Data)
+		p.responseTreeProcessors.mergeFields.ProcessDefer(t.Response.Response.Data, t.Response.DeferDescriptors)
 		p.createFetchTree(t.Response.Response)
 		p.fetchTreeProcessors.processFlatFetchTree(t.Response.Response)
 

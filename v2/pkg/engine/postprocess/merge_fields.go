@@ -2,12 +2,14 @@ package postprocess
 
 import (
 	"bytes"
+	"slices"
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
 )
 
 type mergeFields struct {
-	disable bool
+	disable          bool
+	deferDescriptors map[int]resolve.DeferDescriptor
 }
 
 func (m *mergeFields) Process(node resolve.Node) {
@@ -15,6 +17,13 @@ func (m *mergeFields) Process(node resolve.Node) {
 		return
 	}
 	m.traverseNode(node)
+}
+
+func (m *mergeFields) ProcessDefer(node resolve.Node, deferDescriptors map[int]resolve.DeferDescriptor) {
+	if m.disable {
+		return
+	}
+	(&mergeFields{deferDescriptors: deferDescriptors}).traverseNode(node)
 }
 
 func (m *mergeFields) ProcessSubscription(node resolve.Node) {
@@ -39,12 +48,15 @@ func (m *mergeFields) traverseNode(node resolve.Node) {
 				n.Fields[i].OnTypeNames = [][]byte{n.Fields[i].OnTypeNames[0]}
 				for j := range additionalTypeNames {
 					additionalField := &resolve.Field{
-						Name:        n.Fields[i].Name,
-						Value:       n.Fields[i].Value.Copy(),
-						Position:    n.Fields[i].Position,
-						OnTypeNames: [][]byte{additionalTypeNames[j]},
-						Info:        n.Fields[i].Info,
+						Name:              n.Fields[i].Name,
+						Value:             n.Fields[i].Value.Copy(),
+						Position:          n.Fields[i].Position,
+						Defer:             n.Fields[i].Defer,
+						OnTypeNames:       [][]byte{additionalTypeNames[j]},
+						ParentOnTypeNames: slices.Clone(n.Fields[i].ParentOnTypeNames),
+						Info:              n.Fields[i].Info,
 					}
+					m.copyParentOnTypeNames(n.Fields[i].Value, additionalField.Value)
 					n.Fields = append(n.Fields[:i+1], append([]*resolve.Field{additionalField}, n.Fields[i+1:]...)...)
 				}
 			}
@@ -73,6 +85,11 @@ func (m *mergeFields) traverseNode(node resolve.Node) {
 					continue
 				}
 				if bytes.Equal(n.Fields[i].Name, n.Fields[j].Name) {
+					// a field without onTypeNames is not resolved below parents its parent type conditions exclude,
+					// and the fields below a deferred object are rendered only in its defer scope
+					if m.parentOnTypeNamesExclude(n.Fields[i], n.Fields[j]) || (!m.nodeIsScalar(n.Fields[i].Value) && !m.deferIncludes(n.Fields[i], n.Fields[j])) {
+						continue
+					}
 					m.mergeValues(n.Fields[i], n.Fields[j])
 					n.Fields = append(n.Fields[:j], n.Fields[j+1:]...)
 					if i > j {
@@ -87,8 +104,13 @@ func (m *mergeFields) traverseNode(node resolve.Node) {
 			for j := i + 1; j < len(n.Fields); j++ {
 				if m.fieldsCanMerge(n.Fields[i], n.Fields[j]) {
 					m.mergeValues(n.Fields[i], n.Fields[j])
+					widened := m.widenParentOnTypeNames(n.Fields[i], n.Fields[j])
 					n.Fields = append(n.Fields[:j], n.Fields[j+1:]...)
 					j--
+					if widened {
+						// fields kept apart before can be resolved below the same parents as the merged field now
+						j = i
+					}
 				}
 			}
 		}
@@ -106,12 +128,15 @@ func (m *mergeFields) traverseNode(node resolve.Node) {
 						if !m.canMergeScalars(n.Fields[i], n.Fields[j]) {
 							continue
 						}
-						m.mergeScalars(n.Fields[i], n.Fields[j])
+						widened := m.mergeScalars(n.Fields[i], n.Fields[j])
 						n.Fields = append(n.Fields[:j], n.Fields[j+1:]...)
 						if i > j {
 							i--
 						}
 						j--
+						if widened {
+							j = -1
+						}
 					}
 				}
 			}
@@ -125,52 +150,55 @@ func (m *mergeFields) traverseNode(node resolve.Node) {
 }
 
 func (m *mergeFields) canMergeScalars(left, right *resolve.Field) bool {
+	if !m.sameDefer(left, right) {
+		return false
+	}
+	// step 3 keeps fields with and without onTypeNames apart only if their parent type conditions exclude each other
+	if (left.OnTypeNames == nil) != (right.OnTypeNames == nil) {
+		return false
+	}
 	if left.OnTypeNames != nil && right.OnTypeNames != nil {
 		if !m.sameOnTypeNames(left.OnTypeNames, right.OnTypeNames) {
 			return false
 		}
 	}
-	return true
+	// fields that are never resolved below the same parents stay apart, because a merged field keeps the conditions of one
+	return !m.parentOnTypeNamesExclude(left, right)
 }
 
-func (m *mergeFields) mergeScalars(left, right *resolve.Field) {
+// mergeScalars merges the type conditions of right into left and reports whether left is resolved below more parents
+func (m *mergeFields) mergeScalars(left, right *resolve.Field) bool {
 	// when left has no type conditions, it will overwrite right
 	if left.OnTypeNames == nil && left.ParentOnTypeNames == nil {
-		return
+		return false
 	}
 	// when right has no type conditions, it will overwrite left
 	if right.OnTypeNames == nil && right.ParentOnTypeNames == nil {
 		left.OnTypeNames = nil
 		left.ParentOnTypeNames = nil
-		return
+		return true
 	}
 	left.OnTypeNames = m.deduplicateOnTypeNames(append(left.OnTypeNames, right.OnTypeNames...))
-	if left.ParentOnTypeNames == nil {
-		left.ParentOnTypeNames = right.ParentOnTypeNames
-		return
+	if m.parentOnTypeNamesInclude(left, right) {
+		return false
 	}
-	if right.ParentOnTypeNames == nil {
-		return
+	// the value of left is rendered below the parents of right, which only fits a field of the same definition
+	if !m.sameFieldDefinition(left, right) {
+		return false
 	}
-WithNext:
-	for i := range right.ParentOnTypeNames {
-		for j := range left.ParentOnTypeNames {
-			if right.ParentOnTypeNames[i].Depth == left.ParentOnTypeNames[j].Depth {
-				// merge all parent type conditions at the same depth
-				// this is important because resolvable.go ensures that at each depth layer,
-				// we have at least one matching type condition
-				// otherwise we skip resolving the field
-				left.ParentOnTypeNames[j].Names = m.deduplicateOnTypeNames(append(left.ParentOnTypeNames[j].Names, right.ParentOnTypeNames[i].Names...))
-				continue WithNext
-			}
-		}
-		// if we reach this point, we have a new depth layer and just append it
-		left.ParentOnTypeNames = append(left.ParentOnTypeNames, right.ParentOnTypeNames[i])
+	if !m.parentOnTypeNamesInclude(right, left) {
+		// no single set of conditions holds below the parents of both, so left keeps its own
+		return false
 	}
+	left.ParentOnTypeNames = right.ParentOnTypeNames
+	return true
 }
 
 func (m *mergeFields) fieldsCanMerge(left *resolve.Field, right *resolve.Field) bool {
 	if !bytes.Equal(left.Name, right.Name) {
+		return false
+	}
+	if !m.deferIncludes(left, right) {
 		return false
 	}
 	if left.Value.NodeKind() != right.Value.NodeKind() {
@@ -184,7 +212,64 @@ func (m *mergeFields) fieldsCanMerge(left *resolve.Field, right *resolve.Field) 
 	if m.nodeIsScalar(left.Value) && !m.sameParentOnTypeNames(left, right) {
 		return false
 	}
+	// fields that are never resolved below the same parents stay apart, because a merged field keeps the conditions of one
+	if m.parentOnTypeNamesExclude(left, right) {
+		return false
+	}
 	return true
+}
+
+// widenParentOnTypeNames sets the parent type conditions of right on the merged field left
+// if right is resolved below more parents, and reports whether it did
+func (m *mergeFields) widenParentOnTypeNames(left, right *resolve.Field) bool {
+	if m.parentOnTypeNamesInclude(left, right) || !m.parentOnTypeNamesInclude(right, left) {
+		return false
+	}
+	// left is rendered below the parents of right with its own value and defer scope,
+	// and the fields of nested list items have no parent type conditions
+	if !m.sameFieldDefinition(left, right) || !m.sameDefer(left, right) || m.isNestedList(left.Value) {
+		return false
+	}
+	left.ParentOnTypeNames = right.ParentOnTypeNames
+	return true
+}
+
+// sameDefer reports whether two fields belong to one defer scope, because a merged field is rendered only in the
+// defer scope of the left field.
+func (m *mergeFields) sameDefer(left, right *resolve.Field) bool {
+	if left.Defer == nil || right.Defer == nil {
+		return left.Defer == nil && right.Defer == nil
+	}
+	return left.Defer.DeferID == right.Defer.DeferID
+}
+
+// deferIncludes reports whether the fields of right can be merged into left,
+// because the fields below a deferred field are rendered only in its defer scope and the scopes nested in it
+func (m *mergeFields) deferIncludes(left, right *resolve.Field) bool {
+	if left.Defer == nil {
+		return true
+	}
+	if right.Defer == nil {
+		return false
+	}
+	for id := right.Defer.DeferID; id != 0; id = m.deferDescriptors[id].ParentID {
+		if id == left.Defer.DeferID {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *mergeFields) sameFieldDefinition(left, right *resolve.Field) bool {
+	if left.Info == nil || right.Info == nil {
+		return left.Info == right.Info
+	}
+	return left.Info.Name == right.Info.Name
+}
+
+func (m *mergeFields) isNestedList(node resolve.Node) bool {
+	array, ok := node.(*resolve.Array)
+	return ok && array.Item.NodeKind() == resolve.NodeKindArray
 }
 
 func (m *mergeFields) deduplicateOnTypeNames(onTypeNames [][]byte) [][]byte {
@@ -237,6 +322,55 @@ func (m *mergeFields) sameParentOnTypeNames(left, right *resolve.Field) bool {
 	return true
 }
 
+// parentOnTypeNamesInclude reports whether outer is resolved below all parents that inner is resolved below
+func (m *mergeFields) parentOnTypeNamesInclude(outer, inner *resolve.Field) bool {
+WithNext:
+	for i := range outer.ParentOnTypeNames {
+		for j := range inner.ParentOnTypeNames {
+			if outer.ParentOnTypeNames[i].Depth == inner.ParentOnTypeNames[j].Depth {
+				if !m.containsOnTypeNames(outer.ParentOnTypeNames[i].Names, inner.ParentOnTypeNames[j].Names) {
+					return false
+				}
+				continue WithNext
+			}
+		}
+		return false
+	}
+	return true
+}
+
+func (m *mergeFields) containsOnTypeNames(names, subset [][]byte) bool {
+	for i := range subset {
+		if !slices.ContainsFunc(names, func(name []byte) bool { return bytes.Equal(name, subset[i]) }) {
+			return false
+		}
+	}
+	return true
+}
+
+// parentOnTypeNamesExclude reports whether left and right are never resolved below the same parents
+func (m *mergeFields) parentOnTypeNamesExclude(left, right *resolve.Field) bool {
+	for i := range left.ParentOnTypeNames {
+		for j := range right.ParentOnTypeNames {
+			if left.ParentOnTypeNames[i].Depth == right.ParentOnTypeNames[j].Depth && !m.shareOnTypeName(left.ParentOnTypeNames[i].Names, right.ParentOnTypeNames[j].Names) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (m *mergeFields) shareOnTypeName(left, right [][]byte) bool {
+	for i := range left {
+		for j := range right {
+			if bytes.Equal(left[i], right[j]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (m *mergeFields) mergeValues(left, right *resolve.Field) {
 	switch l := left.Value.(type) {
 	case *resolve.Object:
@@ -249,6 +383,21 @@ func (m *mergeFields) mergeValues(left, right *resolve.Field) {
 			ro := r.Item.(*resolve.Object)
 			lo.Fields = append(lo.Fields, ro.Fields...)
 		}
+	}
+}
+
+// copyParentOnTypeNames copies the parent type conditions of the fields below from to the fields below to,
+// because Copy leaves them out
+func (m *mergeFields) copyParentOnTypeNames(from, to resolve.Node) {
+	switch f := from.(type) {
+	case *resolve.Object:
+		t := to.(*resolve.Object)
+		for i := range f.Fields {
+			t.Fields[i].ParentOnTypeNames = slices.Clone(f.Fields[i].ParentOnTypeNames)
+			m.copyParentOnTypeNames(f.Fields[i].Value, t.Fields[i].Value)
+		}
+	case *resolve.Array:
+		m.copyParentOnTypeNames(f.Item, to.(*resolve.Array).Item)
 	}
 }
 
