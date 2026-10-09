@@ -1401,8 +1401,7 @@ func (p *Planner[T]) configureObjectFieldSource(upstreamFieldRef, downstreamFiel
 	}
 }
 
-// configureContextualArgument renders a contextual argument from the capture planned for the field,
-// or as null when no ancestor can set the context. A client value for the argument is never bound.
+// A client value for the argument is never bound.
 func (p *Planner[T]) configureContextualArgument(upstreamFieldRef, downstreamFieldRef int, fieldConfig plan.FieldConfiguration, argumentConfiguration plan.ArgumentConfiguration) {
 	isContextual := slices.ContainsFunc(p.dataSourceConfig.ContextualArgumentsForField(fieldConfig.TypeName, fieldConfig.FieldName), func(argument plan.ContextualArgumentConfiguration) bool {
 		return argument.ArgumentName == argumentConfiguration.Name

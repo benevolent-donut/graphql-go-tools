@@ -803,7 +803,6 @@ func (c *pathBuilderVisitor) addFieldDependencies(field *currentFieldInfo, curre
 	slices.Sort(fetchConfiguration.dependsOnFetchIDs)
 }
 
-// addContextualArgumentPlans passes the capture or the null decision of each contextual argument to the planner.
 func (c *pathBuilderVisitor) addContextualArgumentPlans(field *currentFieldInfo, plannerIdx int) {
 	requirements, ok := c.fieldContextRequirements[fieldIndexKey{field.fieldRef, field.ds.Hash()}]
 	if !ok {

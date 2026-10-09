@@ -335,8 +335,8 @@ func (v *requiredFieldsVisitor) EnterField(ref int) {
 	v.handleRequiredField(fi)
 }
 
-// handleContextField adds a field of a context selection. The root level __typename of an abstract level
-// is reused when it is in the owner's defer scope; every other field is added, never reused.
+// Only the __typename of an abstract level is reused, in the owner's defer scope; any other existing field
+// could be aliased or deferred differently from the owner.
 func (v *requiredFieldsVisitor) handleContextField(fi requiredFieldInfo) {
 	if fi.isTypeName && v.config.allowTypename && v.isRootLevel() {
 		if !v.selectionSetHasTypeNameInDeferScope(fi.selectionSetRef) {

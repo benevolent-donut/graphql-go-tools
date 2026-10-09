@@ -12,7 +12,6 @@ import (
 
 const contextAliasPrefix = "__context_"
 
-// contextualArgumentRequirement is the planning decision for one contextual argument of a consumer field.
 type contextualArgumentRequirement struct {
 	argumentName string
 	// levels lists the ancestor levels that can set the context, nearest first; nil when no level can.
@@ -97,8 +96,7 @@ func hasContextCandidate(requirements []contextualArgumentRequirement) bool {
 	})
 }
 
-// contextPathLevels derives the levels from the walker ancestors; in the selection set pre-pass
-// the last ancestor owns the selection set of the consumer.
+// Runs in the pre-pass of the consumer's selection set, so the objects of the consumer's parent never form a level.
 func (c *nodeSelectionVisitor) contextPathLevels() (levels []contextPathLevel, ok bool) {
 	ancestors := c.walker.Ancestors
 	if len(ancestors) == 0 || ancestors[0].Kind != ast.NodeKindOperationDefinition {
@@ -169,8 +167,6 @@ func (c *nodeSelectionVisitor) rootOperationTypeName(operationType ast.Operation
 	return string(typeName), len(typeName) > 0
 }
 
-// contextCandidateLevels collects the levels that can set the context, nearest first, and queues their injections.
-// Collection stops at the first static level, because it matches every object.
 func (c *nodeSelectionVisitor) contextCandidateLevels(consumer fieldIndexKey, levels []contextPathLevel, argument ContextualArgumentConfiguration) (candidates []resolve.ContextualArgumentLevel, ok bool) {
 	for _, level := range slices.Backward(levels) {
 		possibleTypes, abstract := c.contextLevelPossibleTypes(level)
@@ -210,6 +206,7 @@ func (c *nodeSelectionVisitor) contextCandidateLevels(consumer fieldIndexKey, le
 			Setters:         setters,
 		})
 
+		// a static level matches every object, so the loader never reads a farther level
 		if !abstract {
 			break
 		}
@@ -218,8 +215,6 @@ func (c *nodeSelectionVisitor) contextCandidateLevels(consumer fieldIndexKey, le
 	return candidates, true
 }
 
-// contextLevelPossibleTypes returns the object types that can occur at the level, taken from the upstream schema
-// of every data source the owner field is selected on.
 func (c *nodeSelectionVisitor) contextLevelPossibleTypes(level contextPathLevel) (typeNames []string, abstract bool) {
 	node, ok := c.definition.NodeByNameStr(level.typeName)
 	if !ok {
@@ -233,6 +228,7 @@ func (c *nodeSelectionVisitor) contextLevelPossibleTypes(level contextPathLevel)
 
 	levelTypeNames := c.definitionObjectTypeNames(node)
 
+	// only the types that every data source selecting the owner field defines can occur at the level
 	for i, dsHash := range c.selectedDataSourceHashes(level.ownerFieldRef) {
 		dsIdx := slices.IndexFunc(c.dataSources, func(d DataSource) bool {
 			return d.Hash() == dsHash
@@ -257,8 +253,6 @@ func (c *nodeSelectionVisitor) contextLevelPossibleTypes(level contextPathLevel)
 	return typeNames, abstract
 }
 
-// ownerFieldTypeNames returns the object types the owner field can return from the data source,
-// with the lookups the abstract selection rewriter uses.
 func (c *nodeSelectionVisitor) ownerFieldTypeNames(ds DataSource, level contextPathLevel) []string {
 	enclosingNode, ok := c.definition.NodeByNameStr(level.ownerTypeName)
 	if !ok {
@@ -320,8 +314,6 @@ func (c *nodeSelectionVisitor) selectedDataSourceHashes(fieldRef int) (out []DSH
 	return out
 }
 
-// contextSelectionPath returns the response keys from a setter object to the context value.
-// The selection is reused when the target already holds it under a context alias, otherwise its injection is queued.
 func (c *nodeSelectionVisitor) contextSelectionPath(consumer fieldIndexKey, level contextPathLevel, abstract bool, setter ContextSetterConfiguration) (path []string, ok bool) {
 	key, report := RequiredFieldsFragment(setter.TypeName, setter.SelectionSet, false)
 	if report.HasErrors() {
@@ -389,7 +381,6 @@ func contextSelectionChain(key *ast.Document, selectionSetRef int) (fieldRef int
 	return fieldRef, nestedPath, true
 }
 
-// contextSelectionField returns the single field of a context selection set, looking through inline fragments.
 func contextSelectionField(document *ast.Document, selectionSetRef int) (fieldRef int, ok bool) {
 	fieldRef = ast.InvalidRef
 	for _, selectionRef := range document.SelectionSets[selectionSetRef].SelectionRefs {
@@ -538,7 +529,7 @@ func (c *nodeSelectionVisitor) nextContextAlias(levelSetRef int) []byte {
 	return alias
 }
 
-// selectionSetHasResponseName checks the selection set and the inline fragments at the same response level.
+// A name used in any fragment at the same response level would merge with the alias in the response.
 func (c *nodeSelectionVisitor) selectionSetHasResponseName(selectionSetRef int, responseName []byte) bool {
 	if exists, _ := c.operation.SelectionSetHasFieldSelectionWithNameOrAliasBytes(selectionSetRef, responseName); exists {
 		return true
@@ -558,8 +549,7 @@ func (c *nodeSelectionVisitor) selectionSetHasResponseName(selectionSetRef int, 
 	return false
 }
 
-// queueContextLevelTypename makes sure an abstract level selects __typename in the owner's defer scope,
-// which the loader uses to match setters.
+// The loader matches the setters of an abstract level by __typename.
 func (c *nodeSelectionVisitor) queueContextLevelTypename(level contextPathLevel) {
 	for _, pending := range c.pendingContextInjections[level.targetSetRef] {
 		if pending.isTypename {
@@ -661,10 +651,9 @@ func (c *nodeSelectionVisitor) addContextDependencies(consumer fieldIndexKey, fi
 	}
 }
 
-// addContextKeyBoundary forces an entity fetch for a consumer whose parent is selected on its own data source.
-// The ordinary key jump covers a parent selected only on other data sources.
 func (c *nodeSelectionVisitor) addContextKeyBoundary(fieldCtx fieldRequirementsContext, fieldKey fieldIndexKey) {
 	dsHash := fieldCtx.dsConfig.Hash()
+	// a parent selected only on other data sources gets the ordinary key jump
 	if !slices.Contains(c.getSelectedParentsDSHashes(fieldCtx.fieldRef), dsHash) {
 		return
 	}
@@ -692,7 +681,6 @@ func (c *nodeSelectionVisitor) addContextKeyBoundary(fieldCtx fieldRequirementsC
 	}, false)
 }
 
-// contextBoundaryKey returns the first resolvable key whose fields the data source resolves itself.
 func contextBoundaryKey(ds DataSource, typeName string) (FederationFieldConfiguration, bool) {
 	for _, key := range ds.RequiredFieldsByKey(typeName) {
 		if err := key.parseSelectionSet(); err != nil {
@@ -717,7 +705,6 @@ func contextBoundaryKey(ds DataSource, typeName string) (FederationFieldConfigur
 	return FederationFieldConfiguration{}, false
 }
 
-// pruneContextRequirements drops the context requirements of consumers no longer selected on their data source.
 func (c *nodeSelectionVisitor) pruneContextRequirements(isSelected func(fieldRef int, dsHash DSHash) bool) {
 	for fieldKey := range c.fieldContextRequirements {
 		if isSelected(fieldKey.fieldRef, fieldKey.dsHash) {
