@@ -110,6 +110,8 @@ func BenchmarkContextualBatchEntityFetch(b *testing.B) {
 		{name: "case=independent_100_fetches/items=2000", usersPerQueue: 20, independent: true},
 		{name: "case=no_context/items=4000", usersPerQueue: 40},
 		{name: "case=values_100/items=4000", usersPerQueue: 40, values: 100},
+		{name: "case=no_context/items=8000", usersPerQueue: 80},
+		{name: "case=values_100/items=8000", usersPerQueue: 80, values: 100},
 	} {
 		b.Run(bc.name, func(b *testing.B) {
 			response := contextualBenchmarkPlan(bc.usersPerQueue, bc.values, bc.independent)
