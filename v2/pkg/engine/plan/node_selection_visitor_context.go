@@ -10,7 +10,7 @@ import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
 )
 
-const contextAliasPrefix = "__context_"
+const contextAliasPrefix = resolve.ContextualArgumentAliasPrefix
 
 type contextualArgumentRequirement struct {
 	argumentName string

@@ -4,6 +4,9 @@ import (
 	"slices"
 )
 
+// ContextualArgumentAliasPrefix starts the response key under which the planner selects the value of a context.
+const ContextualArgumentAliasPrefix = "__context_"
+
 // ContextualArgumentCapture tells the loader where to read one contextual argument value for each item of an entity fetch.
 type ContextualArgumentCapture struct {
 	VariableName string
