@@ -860,6 +860,183 @@ func contextualArgumentsContributedImplementationConfiguration(t *testing.T) pla
 	}
 }
 
+const contextualArgumentsNestedSelectionDefinition = `
+	type Query {
+		queues: [Queue!]!
+	}
+
+	interface Queue {
+		id: ID!
+		subqueues: [Queue!]!
+		flaggedUsers: [User!]!
+	}
+
+	type ModerationQueue implements Queue {
+		id: ID!
+		team: Team
+		subqueues: [Queue!]!
+		flaggedUsers: [User!]!
+	}
+
+	type AppealQueue implements Queue {
+		id: ID!
+		subqueues: [Queue!]!
+		flaggedUsers: [User!]!
+	}
+
+	type Team {
+		id: ID!
+		name: String
+	}
+
+	type User {
+		id: ID!
+		teamView: String
+		teamTypeView: String
+	}
+`
+
+// contextualArgumentsNestedSelectionConfiguration plans the setter subgraph with flattened fragments, and its context
+// selections read a nested field: Team.name is owned by a third subgraph, Team.__typename by the setter subgraph.
+func contextualArgumentsNestedSelectionConfiguration(t *testing.T) plan.Configuration {
+	moderationSDL := `
+		type Query {
+			queues: [Queue!]!
+		}
+
+		interface Queue {
+			id: ID!
+			subqueues: [Queue!]!
+			flaggedUsers: [User!]!
+		}
+
+		type ModerationQueue implements Queue @key(fields: "id") {
+			id: ID!
+			team: Team
+			subqueues: [Queue!]!
+			flaggedUsers: [User!]!
+		}
+
+		type AppealQueue implements Queue @key(fields: "id") {
+			id: ID!
+			subqueues: [Queue!]!
+			flaggedUsers: [User!]!
+		}
+
+		type Team @key(fields: "id") {
+			id: ID!
+		}
+
+		type User @key(fields: "id", resolvable: false) {
+			id: ID!
+		}
+	`
+
+	publicSDL := `
+		type Team @key(fields: "id") {
+			id: ID!
+			name: String
+		}
+	`
+
+	usersSDL := `
+		type ModerationQueue @key(fields: "id") @context(name: "teamScope") @context(name: "teamTypeScope") {
+			id: ID!
+			team: Team @external
+		}
+
+		type Team @key(fields: "id") {
+			id: ID!
+			name: String @external
+		}
+
+		type User @key(fields: "id") {
+			id: ID!
+			teamView(teamName: String @fromContext(field: "$teamScope { team { name } }")): String
+			teamTypeView(typeName: String @fromContext(field: "$teamTypeScope { team { __typename } }")): String
+		}
+	`
+
+	moderation, err := plan.NewDataSourceConfiguration[Configuration]("moderation", contextualArgumentsFlatteningFactory{&Factory[Configuration]{}},
+		&plan.DataSourceMetadata{
+			RootNodes: []plan.TypeField{
+				{TypeName: "Query", FieldNames: []string{"queues"}},
+				{TypeName: "ModerationQueue", FieldNames: []string{"id", "team", "subqueues", "flaggedUsers"}},
+				{TypeName: "AppealQueue", FieldNames: []string{"id", "subqueues", "flaggedUsers"}},
+				{TypeName: "Team", FieldNames: []string{"id"}},
+				{TypeName: "User", FieldNames: []string{"id"}},
+			},
+			ChildNodes: []plan.TypeField{
+				{TypeName: "Queue", FieldNames: []string{"id", "subqueues", "flaggedUsers"}},
+			},
+			FederationMetaData: plan.FederationMetaData{
+				Keys: plan.FederationFieldConfigurations{
+					{TypeName: "ModerationQueue", SelectionSet: "id"},
+					{TypeName: "AppealQueue", SelectionSet: "id"},
+					{TypeName: "Team", SelectionSet: "id"},
+					{TypeName: "User", SelectionSet: "id", DisableEntityResolver: true},
+				},
+			},
+		},
+		mustCustomConfiguration(t, ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: "http://moderation"},
+			SchemaConfiguration: mustSchema(t, &FederationConfiguration{Enabled: true, ServiceSDL: moderationSDL}, moderationSDL),
+		}),
+	)
+	require.NoError(t, err)
+
+	public := mustDataSourceConfiguration(t, "public",
+		&plan.DataSourceMetadata{
+			RootNodes: []plan.TypeField{
+				{TypeName: "Team", FieldNames: []string{"id", "name"}},
+			},
+			FederationMetaData: plan.FederationMetaData{
+				Keys: plan.FederationFieldConfigurations{
+					{TypeName: "Team", SelectionSet: "id"},
+				},
+			},
+		},
+		mustCustomConfiguration(t, ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: "http://public"},
+			SchemaConfiguration: mustSchema(t, &FederationConfiguration{Enabled: true, ServiceSDL: publicSDL}, publicSDL),
+		}),
+	)
+
+	users := mustDataSourceConfiguration(t, "users",
+		&plan.DataSourceMetadata{
+			RootNodes: []plan.TypeField{
+				{TypeName: "ModerationQueue", FieldNames: []string{"id"}, ExternalFieldNames: []string{"team"}},
+				{TypeName: "Team", FieldNames: []string{"id"}, ExternalFieldNames: []string{"name"}},
+				{TypeName: "User", FieldNames: []string{"id", "teamView", "teamTypeView"}},
+			},
+			FederationMetaData: plan.FederationMetaData{
+				Keys: plan.FederationFieldConfigurations{
+					{TypeName: "ModerationQueue", SelectionSet: "id"},
+					{TypeName: "Team", SelectionSet: "id"},
+					{TypeName: "User", SelectionSet: "id"},
+				},
+				ContextualArguments: plan.ContextualArgumentConfigurations{
+					{TypeName: "User", FieldName: "teamView", ArgumentName: "teamName", ContextName: "teamScope", Setters: []plan.ContextSetterConfiguration{{TypeName: "ModerationQueue", SelectionSet: "team { name }"}}},
+					{TypeName: "User", FieldName: "teamTypeView", ArgumentName: "typeName", ContextName: "teamTypeScope", Setters: []plan.ContextSetterConfiguration{{TypeName: "ModerationQueue", SelectionSet: "team { __typename }"}}},
+				},
+			},
+		},
+		mustCustomConfiguration(t, ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: "http://users"},
+			SchemaConfiguration: mustSchema(t, &FederationConfiguration{Enabled: true, ServiceSDL: usersSDL}, usersSDL),
+		}),
+	)
+
+	return plan.Configuration{
+		DataSources:                  []plan.DataSource{moderation, public, users},
+		DisableResolveFieldPositions: true,
+		Fields: plan.FieldConfigurations{
+			{TypeName: "User", FieldName: "teamView", Arguments: plan.ArgumentsConfigurations{{Name: "teamName", SourceType: plan.ContextualArgumentSource}}},
+			{TypeName: "User", FieldName: "teamTypeView", Arguments: plan.ArgumentsConfigurations{{Name: "typeName", SourceType: plan.ContextualArgumentSource}}},
+		},
+	}
+}
+
 func contextualField(name string, value resolve.Node, onTypeNames ...string) *resolve.Field {
 	field := &resolve.Field{Name: []byte(name), Value: value}
 	for _, typeName := range onTypeNames {
@@ -2586,6 +2763,118 @@ func TestGraphQLDataSourceFederation_ContextualArguments(t *testing.T) {
 										contextualField("flaggedUsers", contextualUsers("flaggedUsers", contextualProfile()), "ModerationQueue"),
 									))),
 								)),
+							},
+						},
+					},
+				},
+				planConfiguration,
+				WithDefaultPostProcessor(),
+			)
+		})
+	})
+
+	t.Run("nested selections under flattened levels", func(t *testing.T) {
+		planConfiguration := contextualArgumentsNestedSelectionConfiguration(t)
+
+		users := func(fieldName string) *resolve.Array {
+			return contextualUsers("flaggedUsers", contextualField(fieldName, &resolve.String{Path: []string{fieldName}, Nullable: true}))
+		}
+		queue := func(fields ...*resolve.Field) *resolve.Object {
+			return contextualObject("", false, "Queue", []string{"AppealQueue", "ModerationQueue"}, fields...)
+		}
+		usersOfBothTypes := func(fieldName string) []*resolve.Field {
+			return []*resolve.Field{
+				contextualField("flaggedUsers", users(fieldName), "AppealQueue"),
+				contextualField("flaggedUsers", users(fieldName), "ModerationQueue"),
+			}
+		}
+
+		t.Run("typename leaf of a nested selection is reused after the rewrite", func(t *testing.T) {
+			RunWithPermutations(t, contextualArgumentsNestedSelectionDefinition, `
+				query TeamType {
+					queues {
+						flaggedUsers {
+							teamTypeView
+						}
+					}
+				}`,
+				"TeamType",
+				&plan.SynchronousResponsePlan{
+					Response: &resolve.GraphQLResponse{
+						Fetches: resolve.Sequence(
+							resolve.Single(contextualFetch(0, nil,
+								`{"method":"POST","url":"http://moderation","body":{"query":"{queues {__typename ... on AppealQueue {flaggedUsers {__typename id} __typename} ... on ModerationQueue {flaggedUsers {__typename id} __typename __context_0: team {__typename}}}}"}}`,
+							)),
+							resolve.SingleWithPath(contextualEntityFetch(1, []int{0}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $a: String){_entities(representations: $representations){... on User {__typename teamTypeView(typeName: $a)}}}","variables":{"a":null,"representations":[$$0$$]}}}`,
+								contextualRepresentation("User"),
+							), "queues.@.flaggedUsers", resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ArrayPath("flaggedUsers"), []string{"AppealQueue"})),
+							resolve.SingleWithPath(contextualEntityFetch(2, []int{0}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: String){_entities(representations: $representations){... on User {__typename teamTypeView(typeName: $contextualArgument_0)}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+								contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_0", "__typename")),
+								contextualRepresentation("User"),
+							), "queues.@.flaggedUsers", resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ArrayPath("flaggedUsers"), []string{"ModerationQueue"})),
+						),
+						Data: &resolve.Object{
+							Fields: []*resolve.Field{
+								contextualField("queues", contextualList("queues", queue(usersOfBothTypes("teamTypeView")...))),
+							},
+						},
+					},
+				},
+				planConfiguration,
+				WithDefaultPostProcessor(),
+			)
+		})
+
+		t.Run("nested field owned by another subgraph is reused under two flattened levels", func(t *testing.T) {
+			teamNameFetch := func(fetchID int, path ...resolve.FetchItemPathElement) *resolve.FetchTreeNode {
+				return resolve.SingleWithPath(contextualEntityFetch(fetchID, []int{0}, true,
+					`{"method":"POST","url":"http://public","body":{"query":"query($representations: [_Any!]!){_entities(representations: $representations){... on Team {__typename name}}}","variables":{"representations":[$$0$$]}}}`,
+					contextualRepresentation("Team"),
+				), contextualResponsePath(path), path...)
+			}
+
+			RunWithPermutations(t, contextualArgumentsNestedSelectionDefinition, `
+				query TeamName {
+					queues {
+						subqueues {
+							flaggedUsers {
+								teamView
+							}
+						}
+					}
+				}`,
+				"TeamName",
+				&plan.SynchronousResponsePlan{
+					Response: &resolve.GraphQLResponse{
+						Fetches: resolve.Sequence(
+							resolve.Single(contextualFetch(0, nil,
+								`{"method":"POST","url":"http://moderation","body":{"query":"{queues {__typename ... on AppealQueue {subqueues {__typename ... on AppealQueue {flaggedUsers {__typename id} __typename} ... on ModerationQueue {flaggedUsers {__typename id} __typename __context_0: team {__typename id}}} __typename} ... on ModerationQueue {subqueues {__typename ... on AppealQueue {flaggedUsers {__typename id} __typename} ... on ModerationQueue {flaggedUsers {__typename id} __typename __context_0: team {__typename id}}} __typename __context_1: team {__typename id}}}}"}}`,
+							)),
+							resolve.SingleWithPath(contextualEntityFetch(1, []int{0}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $a: String){_entities(representations: $representations){... on User {__typename teamView(teamName: $a)}}}","variables":{"a":null,"representations":[$$0$$]}}}`,
+								contextualRepresentation("User"),
+							), "queues.@.subqueues.@.flaggedUsers", resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ArrayPath("subqueues"), []string{"AppealQueue"}), resolve.PathElementWithTypeNames(resolve.ArrayPath("flaggedUsers"), []string{"AppealQueue"})),
+							teamNameFetch(2, resolve.ArrayPath("queues"), resolve.ArrayPath("subqueues"), resolve.PathElementWithTypeNames(resolve.ObjectPath("__context_0"), []string{"ModerationQueue"})),
+							teamNameFetch(4, resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ObjectPath("__context_1"), []string{"ModerationQueue"})),
+							resolve.SingleWithPath(contextualEntityFetch(5, []int{0, 2}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: String){_entities(representations: $representations){... on User {__typename teamView(teamName: $contextualArgument_0)}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+								contextualVariable("contextualArgument_0", contextualStaticLevel(2, "ModerationQueue", "__context_0", "name")),
+								contextualRepresentation("User"),
+							), "queues.@.subqueues.@.flaggedUsers", resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ArrayPath("subqueues"), []string{"AppealQueue", "ModerationQueue"}), resolve.PathElementWithTypeNames(resolve.ArrayPath("flaggedUsers"), []string{"ModerationQueue"})),
+							resolve.SingleWithPath(contextualEntityFetch(6, []int{0, 4}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: String){_entities(representations: $representations){... on User {__typename teamView(teamName: $contextualArgument_0)}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+								contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_1", "name")),
+								contextualRepresentation("User"),
+							), "queues.@.subqueues.@.flaggedUsers", resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ArrayPath("subqueues"), []string{"ModerationQueue"}), resolve.PathElementWithTypeNames(resolve.ArrayPath("flaggedUsers"), []string{"AppealQueue"})),
+						),
+						Data: &resolve.Object{
+							Fields: []*resolve.Field{
+								contextualField("queues", contextualList("queues", queue(
+									contextualField("subqueues", contextualList("subqueues", queue(usersOfBothTypes("teamView")...)), "AppealQueue"),
+									contextualField("subqueues", contextualList("subqueues", queue(usersOfBothTypes("teamView")...)), "ModerationQueue"),
+								))),
 							},
 						},
 					},
