@@ -25,12 +25,45 @@ func (d *deduplicateSingleFetches) ProcessFetchTree(root *resolve.FetchTreeNode)
 				newId := root.ChildNodes[i].FetchID()
 				oldId := root.ChildNodes[j].FetchID()
 
+				// The duplicate can have other parents, for example below sibling fragments whose fields
+				// come from different fetches, so the kept fetch has to wait for them as well.
+				d.mergeDependencies(root.ChildNodes[i].Item.Fetch, root.ChildNodes[j].Item.Fetch)
+
 				root.ChildNodes = append(root.ChildNodes[:j], root.ChildNodes[j+1:]...)
 				j--
 
 				// when we merge duplicated fetches, we need to update the dependencies of the other fetches
 				// because they might depend on the fetch that we are removing
 				replaceDependsOnFetchID(root, oldId, newId)
+			}
+		}
+	}
+}
+
+// mergeDependencies adds the fetch dependencies and coordinate dependencies of a removed duplicate to the kept fetch.
+func (d *deduplicateSingleFetches) mergeDependencies(kept, removed resolve.Fetch) {
+	keptDependencies := kept.Dependencies()
+	for _, id := range removed.Dependencies().DependsOnFetchIDs {
+		if id != keptDependencies.FetchID && !slices.Contains(keptDependencies.DependsOnFetchIDs, id) {
+			keptDependencies.DependsOnFetchIDs = append(keptDependencies.DependsOnFetchIDs, id)
+		}
+	}
+
+	keptInfo, removedInfo := kept.FetchInfo(), removed.FetchInfo()
+	if keptInfo == nil || removedInfo == nil {
+		return
+	}
+	for _, dependency := range removedInfo.CoordinateDependencies {
+		i := slices.IndexFunc(keptInfo.CoordinateDependencies, func(existing resolve.FetchDependency) bool {
+			return existing.Coordinate == dependency.Coordinate
+		})
+		if i == -1 {
+			keptInfo.CoordinateDependencies = append(keptInfo.CoordinateDependencies, dependency)
+			continue
+		}
+		for _, origin := range dependency.DependsOn {
+			if !slices.Contains(keptInfo.CoordinateDependencies[i].DependsOn, origin) {
+				keptInfo.CoordinateDependencies[i].DependsOn = append(keptInfo.CoordinateDependencies[i].DependsOn, origin)
 			}
 		}
 	}

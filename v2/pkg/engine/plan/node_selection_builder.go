@@ -257,7 +257,7 @@ func (p *NodeSelectionBuilder) SelectNodes(operation, definition *ast.Document, 
 		}
 	}
 
-	p.nodeSelectionsVisitor.nodeSuggestions.ProcessDefer(p.nodeSelectionsVisitor.fieldRequirementsConfigs)
+	p.nodeSelectionsVisitor.nodeSuggestions.ProcessDefer(p.nodeSelectionsVisitor.fieldRequirementsConfigs, p.nodeSelectionsVisitor.contextKeyBoundaries)
 
 	return &NodeSelectionResult{
 		dataSources:              p.nodeSelectionsVisitor.dataSources,
