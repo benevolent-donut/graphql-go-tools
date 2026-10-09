@@ -358,4 +358,129 @@ func TestMergeFields_Process(t *testing.T) {
 			},
 		},
 	))
+
+	t.Run("object fields of different defer scopes stay apart", runTest(
+		&resolve.Object{
+			Fields: []*resolve.Field{
+				{
+					Name: []byte(`a`),
+					Value: &resolve.Object{
+						Fields: []*resolve.Field{
+							{
+								Name:  []byte(`id`),
+								Value: &resolve.String{},
+							},
+						},
+					},
+				},
+				{
+					Name: []byte(`a`),
+					Value: &resolve.Object{
+						Fields: []*resolve.Field{
+							{
+								Name: []byte(`b`),
+								Value: &resolve.Object{
+									Fields: []*resolve.Field{
+										{
+											Name:  []byte(`c`),
+											Value: &resolve.Integer{},
+										},
+									},
+								},
+							},
+						},
+					},
+					OnTypeNames: [][]byte{
+						[]byte(`A`),
+					},
+				},
+				{
+					Name: []byte(`a`),
+					Value: &resolve.Object{
+						Fields: []*resolve.Field{
+							{
+								Name: []byte(`b`),
+								Value: &resolve.Object{
+									Fields: []*resolve.Field{
+										{
+											Name:  []byte(`c`),
+											Value: &resolve.Integer{},
+											Defer: &resolve.DeferField{DeferID: 1},
+										},
+									},
+								},
+								Defer: &resolve.DeferField{DeferID: 1},
+							},
+						},
+					},
+					OnTypeNames: [][]byte{
+						[]byte(`B`),
+					},
+				},
+			},
+		},
+		&resolve.Object{
+			Fields: []*resolve.Field{
+				{
+					Name: []byte(`a`),
+					Value: &resolve.Object{
+						Fields: []*resolve.Field{
+							{
+								Name:  []byte(`id`),
+								Value: &resolve.String{},
+							},
+							{
+								Name: []byte(`b`),
+								Value: &resolve.Object{
+									Fields: []*resolve.Field{
+										{
+											Name:  []byte(`c`),
+											Value: &resolve.Integer{},
+											ParentOnTypeNames: []resolve.ParentOnTypeNames{
+												{
+													Depth: 2,
+													Names: [][]byte{[]byte(`A`)},
+												},
+											},
+										},
+									},
+								},
+								ParentOnTypeNames: []resolve.ParentOnTypeNames{
+									{
+										Depth: 1,
+										Names: [][]byte{[]byte(`A`)},
+									},
+								},
+							},
+							{
+								Name: []byte(`b`),
+								Value: &resolve.Object{
+									Fields: []*resolve.Field{
+										{
+											Name:  []byte(`c`),
+											Value: &resolve.Integer{},
+											Defer: &resolve.DeferField{DeferID: 1},
+											ParentOnTypeNames: []resolve.ParentOnTypeNames{
+												{
+													Depth: 2,
+													Names: [][]byte{[]byte(`B`)},
+												},
+											},
+										},
+									},
+								},
+								Defer: &resolve.DeferField{DeferID: 1},
+								ParentOnTypeNames: []resolve.ParentOnTypeNames{
+									{
+										Depth: 1,
+										Names: [][]byte{[]byte(`B`)},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	))
 }
