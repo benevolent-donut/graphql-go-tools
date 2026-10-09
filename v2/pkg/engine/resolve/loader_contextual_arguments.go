@@ -29,6 +29,33 @@ const (
 	contextualArgumentGroupsNotSentOne   = "1 request for distinct contextual argument values was not sent because the operation was canceled or timed out"
 )
 
+// endErrorPathsBeforeContextAliases ends error paths at the object that sets a context, because the planner selects
+// the context value under an internal alias that is not part of the client operation.
+func endErrorPathsBeforeContextAliases(a arena.Arena, values []*astjson.Value) {
+	for _, value := range values {
+		errorPath := value.Get("path")
+		if astjson.ValueIsNull(errorPath) || errorPath.Type() != astjson.TypeArray {
+			continue
+		}
+		pathItems := errorPath.GetArray()
+		for i, item := range pathItems {
+			if item.Type() != astjson.TypeString || !strings.HasPrefix(unsafebytes.BytesToString(item.GetStringBytes()), ContextualArgumentAliasPrefix) {
+				continue
+			}
+			if i == 0 {
+				value.Del("path")
+				break
+			}
+			arr := astjson.ArrayValue(a)
+			for _, pathItem := range pathItems[:i] {
+				astjson.AppendToArray(a, arr, pathItem)
+			}
+			value.Set(a, "path", arr)
+			break
+		}
+	}
+}
+
 // fetchContextualArguments returns the contextual argument captures of an entity fetch.
 func fetchContextualArguments(fetch Fetch) []ContextualArgumentCapture {
 	switch f := fetch.(type) {

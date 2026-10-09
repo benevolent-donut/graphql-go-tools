@@ -1108,6 +1108,7 @@ func (l *Loader) mergeErrors(res *result, fetchItem *FetchItem, value *astjson.V
 	// never leaks the internal alias.
 	if l.rewriteSubgraphErrorPaths {
 		rewriteErrorPaths(l.jsonArena, fetchItem, values, res.errorPathRoot())
+		endErrorPathsBeforeContextAliases(l.jsonArena, values)
 	} else if res.multi != nil {
 		hideAliasInErrorPaths(l.jsonArena, res.multi.alias, values)
 	}

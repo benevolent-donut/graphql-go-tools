@@ -1259,6 +1259,46 @@ func TestContextualArgumentSubgraphSingleflight(t *testing.T) {
 	})
 }
 
+func TestContextualArgumentErrorPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "a rewritten entity path ends at the setter object",
+			input:    `{"message":"failed","path":["moderationQueues","__context_0"]}`,
+			expected: `{"message":"failed","path":["moderationQueues"]}`,
+		},
+		{
+			name:     "a nested selection below the alias is dropped with it",
+			input:    `{"message":"failed","path":["moderationQueues",1,"__context_0","id"]}`,
+			expected: `{"message":"failed","path":["moderationQueues",1]}`,
+		},
+		{
+			name:     "an alias on the root data removes the path",
+			input:    `{"message":"failed","path":["__context_0"]}`,
+			expected: `{"message":"failed"}`,
+		},
+		{
+			name:     "paths without an alias stay unchanged",
+			input:    `{"message":"failed","path":["moderationQueues",1,"includeSuspended"]}`,
+			expected: `{"message":"failed","path":["moderationQueues",1,"includeSuspended"]}`,
+		},
+		{
+			name:     "errors without a path stay unchanged",
+			input:    `{"message":"failed"}`,
+			expected: `{"message":"failed"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value := astjson.MustParse(tc.input)
+			endErrorPathsBeforeContextAliases(nil, []*astjson.Value{value})
+			assert.Equal(t, tc.expected, string(value.MarshalTo(nil)))
+		})
+	}
+}
+
 func TestContextualArgumentVariableWithoutGroupValues(t *testing.T) {
 	segment := (&ContextualArgumentVariable{Capture: queueContextualCapture}).TemplateSegment()
 
