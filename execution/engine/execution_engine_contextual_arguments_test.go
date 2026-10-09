@@ -895,6 +895,45 @@ func TestExecutionEngine_ContextualArguments(t *testing.T) {
 				`{"flaggedUsers":[{"id":"u5","profile":{"displayName":"u5","includeSuspended":null}}]}]}}`,
 		},
 		{
+			name:  "a fetch below sibling fragments waits for their contextual and literal null fetches",
+			query: `{ scopes { ... on Queue { flaggedUsers { friends { handle } badge } } } }`,
+			runs:  20,
+			exchanges: []contextualExchange{
+				{
+					subgraph: "moderation",
+					body:     `{"query":"{scopes {__typename ... on AppealQueue {flaggedUsers {__typename id}} ... on ModerationQueue {flaggedUsers {__typename id} includeSuspended __typename id}}}"}`,
+					response: `{"data":{"scopes":[` +
+						`{"__typename":"ModerationQueue","flaggedUsers":[{"__typename":"User","id":"u2"},{"__typename":"User","id":"u3"}],"includeSuspended":false,"id":"q2"},` +
+						`{"__typename":"AppealQueue","flaggedUsers":[{"__typename":"User","id":"u5"}]},` +
+						`{"__typename":"Team"}]}}`,
+				},
+				{
+					subgraph: "public",
+					body:     `{"query":"query($representations: [_Any!]!){_entities(representations: $representations){... on ModerationQueue {__typename __context_0: policyLevel}}}","variables":{"representations":[{"__typename":"ModerationQueue","includeSuspended":false,"id":"q2"}]}}`,
+					response: `{"data":{"_entities":[{"__typename":"ModerationQueue","__context_0":1}]}}`,
+				},
+				{
+					subgraph: "users",
+					body:     `{"query":"query($representations: [_Any!]!, $a: Int){_entities(representations: $representations){... on User {__typename friends {__typename id} badge(level: $a)}}}","variables":{"a":null,"representations":[{"__typename":"User","id":"u5"}]}}`,
+					response: `{"data":{"_entities":[{"__typename":"User","friends":[],"badge":"u5|level=null"}]}}`,
+				},
+				{
+					subgraph: "users",
+					body:     `{"query":"query($representations: [_Any!]!, $contextualArgument_0: Int){_entities(representations: $representations){... on User {__typename friends {__typename id} badge(level: $contextualArgument_0)}}}","variables":{"representations":[{"__typename":"User","id":"u2"},{"__typename":"User","id":"u3"}],"contextualArgument_0":1}}`,
+					response: `{"data":{"_entities":[{"__typename":"User","friends":[{"__typename":"User","id":"u3"}],"badge":"u2|level=1"},{"__typename":"User","friends":[],"badge":"u3|level=1"}]}}`,
+				},
+				{
+					subgraph: "public",
+					body:     `{"query":"query($representations: [_Any!]!){_entities(representations: $representations){... on User {__typename handle}}}","variables":{"representations":[{"__typename":"User","id":"u3"}]}}`,
+					response: `{"data":{"_entities":[{"__typename":"User","handle":"h-u3"}]}}`,
+				},
+			},
+			expectedResponse: `{"data":{"scopes":[` +
+				`{"flaggedUsers":[{"friends":[{"handle":"h-u3"}],"badge":"u2|level=1"},{"friends":[],"badge":"u3|level=1"}]},` +
+				`{"flaggedUsers":[{"friends":[],"badge":"u5|level=null"}]},` +
+				`{}]}}`,
+		},
+		{
 			name:  "abstract level with partial setter types sends null for the other types",
 			query: `{ queues { id flaggedUsers { id profile { displayName includeSuspended } } } }`,
 			exchanges: []contextualExchange{
@@ -1240,6 +1279,66 @@ func TestExecutionEngine_ContextualArgumentsDefer(t *testing.T) {
 			},
 			expectedResponse: `{"data":{"moderationQueue":{"flaggedUsers":[{"id":"u1","profile":{"displayName":"u1","includeSuspended":true}},{"id":"u2","profile":{"displayName":"u2","includeSuspended":true}}]}},"pending":[{"id":"1","path":["moderationQueue"]}],"hasNext":true}
 {"incremental":[{"data":{"includeSuspended":true},"id":"1"}],"completed":[{"id":"1"}],"hasNext":false}
+`,
+		},
+		{
+			name:  "deferred field below a consumer whose parent comes from the consumer's subgraph",
+			query: `{ moderationQueue(id: "q1") { flaggedUsers { friends { profile { displayName } ... @defer { profile { includeSuspended } } } } } }`,
+			exchanges: []contextualExchange{
+				{
+					subgraph: "moderation",
+					body:     `{"query":"query($a: ID!){moderationQueue(id: $a){flaggedUsers {__typename id} __context_0: includeSuspended}}","variables":{"a":"q1"}}`,
+					response: `{"data":{"moderationQueue":{"flaggedUsers":[{"__typename":"User","id":"u1"},{"__typename":"User","id":"u2"}],"__context_0":true}}}`,
+				},
+				{
+					subgraph: "users",
+					body:     `{"query":"query($representations: [_Any!]!){_entities(representations: $representations){... on User {__typename friends {__typename id}}}}","variables":{"representations":[{"__typename":"User","id":"u1"},{"__typename":"User","id":"u2"}]}}`,
+					response: `{"data":{"_entities":[{"__typename":"User","friends":[{"__typename":"User","id":"u2"}]},{"__typename":"User","friends":[{"__typename":"User","id":"u3"}]}]}}`,
+				},
+				{
+					subgraph: "users",
+					body:     `{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $contextualArgument_0){displayName}}}}","variables":{"representations":[{"__typename":"User","id":"u2"},{"__typename":"User","id":"u3"}],"contextualArgument_0":true}}`,
+					response: `{"data":{"_entities":[{"__typename":"User","profile":{"displayName":"u2"}},{"__typename":"User","profile":{"displayName":"u3"}}]}}`,
+				},
+				{
+					subgraph: "users",
+					body:     `{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $contextualArgument_0){includeSuspended}}}}","variables":{"representations":[{"__typename":"User","id":"u2"},{"__typename":"User","id":"u3"}],"contextualArgument_0":true}}`,
+					response: `{"data":{"_entities":[{"__typename":"User","profile":{"includeSuspended":true}},{"__typename":"User","profile":{"includeSuspended":true}}]}}`,
+				},
+			},
+			expectedResponse: `{"data":{"moderationQueue":{"flaggedUsers":[{"friends":[{"profile":{"displayName":"u2"}}]},{"friends":[{"profile":{"displayName":"u3"}}]}]}},"pending":[{"id":"1","path":["moderationQueue","flaggedUsers"]}],"hasNext":true}
+{"incremental":[{"data":{"includeSuspended":true},"id":"1","subPath":[0,"friends",0,"profile"]},{"data":{"includeSuspended":true},"id":"1","subPath":[1,"friends",0,"profile"]}],"completed":[{"id":"1"}],"hasNext":false}
+`,
+		},
+		{
+			name:  "deferred consumer of a sibling fragment is delivered in its defer scope",
+			query: `{ queues { flaggedUsers { id } ... on ModerationQueue { flaggedUsers { viewerView } } ... on AppealQueue { flaggedUsers { ... @defer { viewerView } } } } }`,
+			exchanges: []contextualExchange{
+				{
+					subgraph: "users",
+					body:     `{"query":"{__context_0: viewerIncludeSuspended}"}`,
+					response: `{"data":{"__context_0":true}}`,
+				},
+				{
+					subgraph: "moderation",
+					body:     `{"query":"{queues {__typename flaggedUsers {id} ... on ModerationQueue {flaggedUsers {__typename id}} ... on AppealQueue {flaggedUsers {__internal_typename: __typename __typename id}}}}"}`,
+					response: `{"data":{"queues":[` +
+						`{"__typename":"ModerationQueue","flaggedUsers":[{"id":"u1","__typename":"User"},{"id":"u2","__typename":"User"}]},` +
+						`{"__typename":"AppealQueue","flaggedUsers":[{"id":"u5","__internal_typename":"User","__typename":"User"}]}]}}`,
+				},
+				{
+					subgraph: "users",
+					body:     `{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename viewerView(includeSuspended: $contextualArgument_0)}}}","variables":{"representations":[{"__typename":"User","id":"u1"},{"__typename":"User","id":"u2"}],"contextualArgument_0":true}}`,
+					response: `{"data":{"_entities":[{"__typename":"User","viewerView":"u1|includeSuspended=true"},{"__typename":"User","viewerView":"u2|includeSuspended=true"}]}}`,
+				},
+				{
+					subgraph: "users",
+					body:     `{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename viewerView(includeSuspended: $contextualArgument_0)}}}","variables":{"representations":[{"__typename":"User","id":"u5"}],"contextualArgument_0":true}}`,
+					response: `{"data":{"_entities":[{"__typename":"User","viewerView":"u5|includeSuspended=true"}]}}`,
+				},
+			},
+			expectedResponse: `{"data":{"queues":[{"flaggedUsers":[{"id":"u1","viewerView":"u1|includeSuspended=true"},{"id":"u2","viewerView":"u2|includeSuspended=true"}]},{"flaggedUsers":[{"id":"u5"}]}]},"pending":[{"id":"1","path":["queues"]}],"hasNext":true}
+{"incremental":[{"data":{"viewerView":"u5|includeSuspended=true"},"id":"1","subPath":[1,"flaggedUsers",0]}],"completed":[{"id":"1"}],"hasNext":false}
 `,
 		},
 	}
