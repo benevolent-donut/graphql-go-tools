@@ -365,6 +365,19 @@ func TestMergeMultiEntityResult_FanOut(t *testing.T) {
 	assertMergedErrors(t, f.loader, "")
 }
 
+func TestMergeMultiEntityResult_NestedList(t *testing.T) {
+	f := multiFetchFixture(t, withSeed(`{"employees":[[{"__typename":"Employee","id":1}],null,[{"__typename":"Employee","id":2}]],"employee":{"__typename":"Employee","id":9}}`))
+	ds := &recordingDataSource{response: []byte(`{"data":{"f1":[{"products":[{"upc":"1"}]},{"products":[{"upc":"2"}]}],"f2":[{"notes":"n"}]}}`)}
+	f.fetch.DataSource = ds
+
+	require.NoError(t, f.loader.resolveSingle(t.Context(), f.item))
+
+	assert.Equal(t, `{"method":"POST","url":"http://x","body":{"query":"Q","variables":{"representations_f1":[{"__typename":"Employee","id":1},{"__typename":"Employee","id":2}],"includeF1":true,"representations_f2":[{"__typename":"Employee","id":9}],"includeF2":true}}}`, string(ds.lastInput))
+	expected := `{"employees":[[{"__typename":"Employee","id":1,"products":[{"upc":"1"}]}],null,[{"__typename":"Employee","id":2,"products":[{"upc":"2"}]}]],"employee":{"__typename":"Employee","id":9,"notes":"n"}}`
+	assert.JSONEq(t, expected, string(f.loader.dataBuffer.Get().MarshalTo(nil)))
+	assertMergedErrors(t, f.loader, "")
+}
+
 func TestMergeMultiEntityResult_ErrorPartitioning(t *testing.T) {
 	body := `{"data":{"f1":[{"products":[{"upc":"1"}]},{"products":[{"upc":"2"}]}],"f2":[{"notes":"n"}]},"errors":[{"message":"a","path":["f1",0,"products"]},{"message":"b","path":["f2"]},{"message":"c"}]}`
 	seed := `{"employees":[{"__typename":"Employee","id":1},{"__typename":"Employee","id":2},{"__typename":"Employee","id":1}],"employee":{"__typename":"Employee","id":9}}`

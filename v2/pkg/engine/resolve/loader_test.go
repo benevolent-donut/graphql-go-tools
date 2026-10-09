@@ -1548,6 +1548,83 @@ func TestLoader_InvalidBatchItemCount(t *testing.T) {
 	assert.Equal(t, expected, out)
 }
 
+func TestLoader_NestedListEntities(t *testing.T) {
+	testCases := []struct {
+		name            string
+		data            string
+		path            []FetchItemPathElement
+		representations string
+		entities        string
+		expected        string
+	}{
+		{
+			name:            "list of lists",
+			data:            `{"pages":[[{"__typename":"User","id":1},{"__typename":"User","id":2}],[],[{"__typename":"User","id":2}]]}`,
+			path:            []FetchItemPathElement{ArrayPath("pages")},
+			representations: `[{"__typename":"User","id":1},{"__typename":"User","id":2}]`,
+			entities:        `[{"name":"a"},{"name":"b"}]`,
+			expected:        `{"pages":[[{"__typename":"User","id":1,"name":"a"},{"__typename":"User","id":2,"name":"b"}],[],[{"__typename":"User","id":2,"name":"b"}]]}`,
+		},
+		{
+			name:            "list of lists of lists",
+			data:            `{"shelves":[[[{"__typename":"User","id":1}],[{"__typename":"User","id":2}]],[[{"__typename":"User","id":3}]]]}`,
+			path:            []FetchItemPathElement{ArrayPath("shelves")},
+			representations: `[{"__typename":"User","id":1},{"__typename":"User","id":2},{"__typename":"User","id":3}]`,
+			entities:        `[{"name":"a"},{"name":"b"},{"name":"c"}]`,
+			expected:        `{"shelves":[[[{"__typename":"User","id":1,"name":"a"}],[{"__typename":"User","id":2,"name":"b"}]],[[{"__typename":"User","id":3,"name":"c"}]]]}`,
+		},
+		{
+			name:            "nulls inside a list of lists",
+			data:            `{"pages":[null,[{"__typename":"User","id":1},null],[],[{"__typename":"User","id":3}]]}`,
+			path:            []FetchItemPathElement{ArrayPath("pages")},
+			representations: `[{"__typename":"User","id":1},{"__typename":"User","id":3}]`,
+			entities:        `[{"name":"a"},{"name":"c"}]`,
+			expected:        `{"pages":[null,[{"__typename":"User","id":1,"name":"a"},null],[],[{"__typename":"User","id":3,"name":"c"}]]}`,
+		},
+		{
+			name:            "list of lists under a list",
+			data:            `{"queues":[{"pages":[[{"__typename":"User","id":1}],[{"__typename":"User","id":2}]]},{"pages":[[{"__typename":"User","id":3}]]}]}`,
+			path:            []FetchItemPathElement{ArrayPath("queues"), ArrayPath("pages")},
+			representations: `[{"__typename":"User","id":1},{"__typename":"User","id":2},{"__typename":"User","id":3}]`,
+			entities:        `[{"name":"a"},{"name":"b"},{"name":"c"}]`,
+			expected:        `{"queues":[{"pages":[[{"__typename":"User","id":1,"name":"a"}],[{"__typename":"User","id":2,"name":"b"}]]},{"pages":[[{"__typename":"User","id":3,"name":"c"}]]}]}`,
+		},
+		{
+			name:            "list under a list of lists",
+			data:            `{"grid":[[{"users":[{"__typename":"User","id":1},{"__typename":"User","id":2}]}],[{"users":[{"__typename":"User","id":3}]}]]}`,
+			path:            []FetchItemPathElement{ArrayPath("grid"), ArrayPath("users")},
+			representations: `[{"__typename":"User","id":1},{"__typename":"User","id":2},{"__typename":"User","id":3}]`,
+			entities:        `[{"name":"a"},{"name":"b"},{"name":"c"}]`,
+			expected:        `{"grid":[[{"users":[{"__typename":"User","id":1,"name":"a"},{"__typename":"User","id":2,"name":"b"}]}],[{"users":[{"__typename":"User","id":3,"name":"c"}]}]]}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ds := &recordingDataSource{response: []byte(`{"data":{"_entities":` + tc.entities + `}}`)}
+			fetch := &BatchEntityFetch{
+				Input: BatchInput{
+					Header:               multiStaticTemplate(`[`),
+					Items:                []InputTemplate{multiRepresentationsTemplate()},
+					Separator:            multiStaticTemplate(`,`),
+					Footer:               multiStaticTemplate(`]`),
+					SkipNullItems:        true,
+					SkipEmptyObjectItems: true,
+					SkipErrItems:         true,
+				},
+				DataSource:     ds,
+				PostProcessing: PostProcessingConfiguration{SelectResponseDataPath: []string{"data", "_entities"}},
+			}
+			loader := &Loader{dataBuffer: &DataBuffer{data: astjson.MustParse(tc.data)}}
+
+			require.NoError(t, loader.LoadGraphQLResponseData(NewContext(t.Context()), &GraphQLResponse{Fetches: Single(fetch, tc.path...)}))
+			assert.Equal(t, 1, ds.calls)
+			assert.Equal(t, tc.representations, string(ds.lastInput))
+			assert.Equal(t, tc.expected, string(loader.dataBuffer.Get().MarshalTo(nil)))
+		})
+	}
+}
+
 func TestRewriteErrorPaths(t *testing.T) {
 	mp := astjson.MustParse
 	testCases := []struct {
