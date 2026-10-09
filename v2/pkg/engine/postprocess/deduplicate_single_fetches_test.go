@@ -364,6 +364,54 @@ func TestDeduplicateSingleFetches_ProcessFetchTree(t *testing.T) {
 		assert.Equal(t, output, input)
 	})
 
+	t.Run("same path, same input, different dependencies - should keep the dependencies of both fetches", func(t *testing.T) {
+		fetch := func(fetchID int, dependsOn []int, input string, coordinateDependencies []resolve.FetchDependency) *resolve.FetchTreeNode {
+			return &resolve.FetchTreeNode{
+				Kind: resolve.FetchTreeNodeKindSingle,
+				Item: &resolve.FetchItem{
+					FetchPath: []resolve.FetchItemPathElement{{Kind: resolve.FetchItemPathElementKindArray, Path: []string{"things", "users"}}},
+					Fetch: &resolve.SingleFetch{
+						FetchDependencies:  resolve.FetchDependencies{FetchID: fetchID, DependsOnFetchIDs: dependsOn},
+						FetchConfiguration: resolve.FetchConfiguration{Input: input},
+						Info:               &resolve.FetchInfo{CoordinateDependencies: coordinateDependencies},
+					},
+				},
+			}
+		}
+		name := resolve.GraphCoordinate{TypeName: "User", FieldName: "name"}
+		id := resolve.GraphCoordinate{TypeName: "User", FieldName: "id"}
+		email := resolve.GraphCoordinate{TypeName: "User", FieldName: "email"}
+
+		input := &resolve.FetchTreeNode{
+			ChildNodes: []*resolve.FetchTreeNode{
+				fetch(3, []int{1}, "names", []resolve.FetchDependency{
+					{Coordinate: name, IsUserRequested: true, DependsOn: []resolve.FetchDependencyOrigin{{FetchID: 1, Subgraph: "a", Coordinate: id, IsKey: true}}},
+				}),
+				fetch(4, []int{2}, "names", []resolve.FetchDependency{
+					{Coordinate: name, IsUserRequested: true, DependsOn: []resolve.FetchDependencyOrigin{{FetchID: 2, Subgraph: "b", Coordinate: id, IsKey: true}}},
+					{Coordinate: email, IsUserRequested: true, DependsOn: []resolve.FetchDependencyOrigin{{FetchID: 2, Subgraph: "b", Coordinate: id, IsKey: true}}},
+				}),
+			},
+		}
+
+		output := &resolve.FetchTreeNode{
+			ChildNodes: []*resolve.FetchTreeNode{
+				fetch(3, []int{1, 2}, "names", []resolve.FetchDependency{
+					{Coordinate: name, IsUserRequested: true, DependsOn: []resolve.FetchDependencyOrigin{
+						{FetchID: 1, Subgraph: "a", Coordinate: id, IsKey: true},
+						{FetchID: 2, Subgraph: "b", Coordinate: id, IsKey: true},
+					}},
+					{Coordinate: email, IsUserRequested: true, DependsOn: []resolve.FetchDependencyOrigin{{FetchID: 2, Subgraph: "b", Coordinate: id, IsKey: true}}},
+				}),
+			},
+		}
+
+		dedup := &deduplicateSingleFetches{}
+		dedup.ProcessFetchTree(input)
+
+		assert.Equal(t, output, input)
+	})
+
 	t.Run("different path, same input", func(t *testing.T) {
 		input := &resolve.FetchTreeNode{
 			ChildNodes: []*resolve.FetchTreeNode{
