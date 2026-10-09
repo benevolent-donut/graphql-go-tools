@@ -42,6 +42,12 @@ type nodeSelectionVisitor struct {
 	fieldLandedTo               map[int]DSHash                                   // fieldLandedTo is a map[fieldRef]DSHash - holds a datasource hash where field was landed to
 	fieldDependencyKind         map[fieldDependencyKey]fieldDependencyKind
 
+	visitedFieldsContextChecks map[fieldIndexKey]struct{}                        // visitedFieldsContextChecks is a map[fieldIndexKey] of already processed fields which we check for contextual arguments
+	fieldContextRequirements   map[fieldIndexKey][]contextualArgumentRequirement // fieldContextRequirements holds the planning decision for each contextual argument of a field
+	contextKeyBoundaries       map[fieldIndexKey]struct{}                        // contextKeyBoundaries holds fields which got a key jump on their own data source for contextual arguments
+	pendingContextInjections   map[int][]pendingContextInjection                 // pendingContextInjections is a map[selectionSetRef] of context selections to add when the selection set is left
+	contextAliasCounter        int                                               // contextAliasCounter numbers the context aliases of the operation
+
 	secondaryRun bool // secondaryRun is a flag to indicate that we're running the nodeSelectionVisitor not the first time
 	hasNewFields bool // hasNewFields is used to determine if we need to run the planner again. It will be true in case required fields were added
 
@@ -92,6 +98,8 @@ func (c *nodeSelectionVisitor) addNewFieldRefs(fieldRefs ...int) {
 // Requirements of the de-selected pairs would otherwise remain in the dependency maps
 // and produce dependencies on fetches which will never happen.
 func (c *nodeSelectionVisitor) pruneStaleFieldRequirements() {
+	c.pruneContextRequirements(c.nodeSuggestions.hasSelectedSuggestionForFieldRefOnDataSource)
+
 	if len(c.fieldDependsOn) == 0 {
 		return
 	}
@@ -205,6 +213,8 @@ func (c *nodeSelectionVisitor) EnterDocument(operation, definition *ast.Document
 		c.selectionSetRefs = c.selectionSetRefs[:0]
 	}
 
+	c.pendingContextInjections = nil
+
 	if c.secondaryRun {
 		return
 	}
@@ -227,6 +237,11 @@ func (c *nodeSelectionVisitor) EnterDocument(operation, definition *ast.Document
 	c.fieldRefDependsOn = make(map[int][]int)
 	c.fieldRequirementsConfigs = make(map[fieldIndexKey][]FederationFieldConfiguration)
 	c.fieldLandedTo = make(map[int]DSHash)
+
+	c.visitedFieldsContextChecks = nil
+	c.fieldContextRequirements = nil
+	c.contextKeyBoundaries = nil
+	c.contextAliasCounter = 0
 }
 
 func (c *nodeSelectionVisitor) LeaveDocument(operation, definition *ast.Document) {}
@@ -266,6 +281,7 @@ func (c *nodeSelectionVisitor) handleRequiresInSelectionSet(selectionSetRef int)
 func (c *nodeSelectionVisitor) LeaveSelectionSet(ref int) {
 	c.debugPrint("LeaveSelectionSet ref:", ref)
 	c.processPendingKeyRequirements(ref)
+	c.processPendingContextInjections(ref)
 	c.selectionSetRefs = c.selectionSetRefs[:len(c.selectionSetRefs)-1]
 }
 
@@ -325,6 +341,7 @@ func (c *nodeSelectionVisitor) handleEnterField(fieldRef int, handleRequires boo
 		if handleRequires {
 			// check if the field has @requires directive
 			c.handleFieldRequiredByRequires(fieldCtx)
+			c.handleFieldContextArguments(fieldCtx)
 			// skip to the next suggestion as we only handle requires here
 			continue
 		}

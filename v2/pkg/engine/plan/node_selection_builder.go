@@ -25,6 +25,7 @@ type fieldDependencyKind int
 const (
 	fieldDependencyKindKey fieldDependencyKind = iota
 	fieldDependencyKindRequires
+	fieldDependencyKindContext
 )
 
 type NodeSelectionResult struct {
@@ -57,6 +58,9 @@ type NodeSelectionResult struct {
 	// during a rewrite because the abstract type has no possible runtime types
 	// able to provide the requested fields. Resolving such fields is always an error.
 	unresolvableFieldRefs map[int]struct{}
+
+	// fieldContextRequirements maps fieldIndexKey to the planning decision for each contextual argument of the field.
+	fieldContextRequirements map[fieldIndexKey][]contextualArgumentRequirement
 }
 
 func NewNodeSelectionBuilder(config *Configuration) *NodeSelectionBuilder {
@@ -265,6 +269,7 @@ func (p *NodeSelectionBuilder) SelectNodes(operation, definition *ast.Document, 
 		fieldDependencyKind:      p.nodeSelectionsVisitor.fieldDependencyKind,
 		fieldMergingAliasRefs:    p.nodeSelectionsVisitor.fieldMergingAliasRefs,
 		unresolvableFieldRefs:    p.nodeSelectionsVisitor.unresolvableFieldRefs,
+		fieldContextRequirements: p.nodeSelectionsVisitor.fieldContextRequirements,
 	}
 }
 
@@ -304,6 +309,8 @@ func (p *NodeSelectionBuilder) cleanupAbandonedFieldDependencies(operation *ast.
 // pairs which are no longer selected, and returns the field refs those pairs required.
 func (p *NodeSelectionBuilder) dropAbandonedDependencyEntries() map[int]struct{} {
 	v := p.nodeSelectionsVisitor
+
+	v.pruneContextRequirements(v.nodeSuggestions.IsSelectedOnDataSource)
 
 	abandonedRequiredRefs := make(map[int]struct{})
 	for key, requiredRefs := range v.fieldDependsOn {

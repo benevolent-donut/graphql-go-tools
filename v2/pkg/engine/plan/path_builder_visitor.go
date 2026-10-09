@@ -50,7 +50,8 @@ type pathBuilderVisitor struct {
 
 	fieldDependsOn           map[fieldIndexKey][]int // fieldDependsOn is a map[fieldRef][]fieldRef - holds list of field refs which are required by a field ref, e.g. field should be planned only after required fields were planned
 	fieldRequirementsConfigs map[fieldIndexKey][]FederationFieldConfiguration
-	processedFieldDeps       map[fieldIndexKey][]int // processedFieldDeps tracks which plannerIds have already had dependencies wired for a given fieldIndexKey - pair of fieldRef and dsHash
+	processedFieldDeps       map[fieldIndexKey][]int                           // processedFieldDeps tracks which plannerIds have already had dependencies wired for a given fieldIndexKey - pair of fieldRef and dsHash
+	fieldContextRequirements map[fieldIndexKey][]contextualArgumentRequirement // fieldContextRequirements holds the planning decision for each contextual argument of a field
 
 	currentFetchPath    []resolve.FetchItemPathElement
 	currentResponsePath []string
@@ -123,6 +124,9 @@ type objectFetchConfiguration struct {
 	rootFields         []resolve.GraphCoordinate
 	operationType      ast.OperationType
 	deferID            int
+
+	contextualArguments []ContextualArgumentPlan
+	hasTypedFetchPath   bool
 }
 
 type currentFieldInfo struct {
@@ -675,6 +679,7 @@ func (c *pathBuilderVisitor) handlePlanningField(field *currentFieldInfo) {
 	if planned {
 		c.recordFieldPlannedOn(field.fieldRef, plannerIdx)
 		c.addFieldDependencies(field, plannerIdx)
+		c.addContextualArgumentPlans(field, plannerIdx)
 		c.addRootField(field.fieldRef, plannerIdx)
 	}
 
@@ -765,6 +770,7 @@ func (c *pathBuilderVisitor) addFieldDependencies(field *currentFieldInfo, curre
 	requiresConfigurations, ok := c.fieldRequirementsConfigs[fieldKey]
 	if !ok {
 		c.walker.StopWithInternalErr(fmt.Errorf("missing field requirements configuration for field %s.%s fieldRef %d", field.typeName, field.fieldName, field.fieldRef))
+		return
 	}
 	for _, requiresConfiguration := range requiresConfigurations {
 		// add required fields to the current planner to pass it in the representation variables
@@ -795,6 +801,82 @@ func (c *pathBuilderVisitor) addFieldDependencies(field *currentFieldInfo, curre
 	// The slices.Contains check above already guarantees uniqueness, so sort once
 	// here for a deterministic order instead of re-sorting on every insertion.
 	slices.Sort(fetchConfiguration.dependsOnFetchIDs)
+}
+
+// hasContextBoundary reports whether some contextual argument of the field can be set by an ancestor,
+// so the field has to be planned in its own entity fetch.
+func (c *pathBuilderVisitor) hasContextBoundary(fieldKey fieldIndexKey) bool {
+	return slices.ContainsFunc(c.fieldContextRequirements[fieldKey], func(requirement contextualArgumentRequirement) bool {
+		return len(requirement.levels) > 0
+	})
+}
+
+// addContextualArgumentPlans passes the capture or the null decision of each contextual argument to the planner.
+func (c *pathBuilderVisitor) addContextualArgumentPlans(field *currentFieldInfo, plannerIdx int) {
+	requirements, ok := c.fieldContextRequirements[fieldIndexKey{field.fieldRef, field.ds.Hash()}]
+	if !ok {
+		return
+	}
+
+	fetchConfiguration := c.planners[plannerIdx].ObjectFetchConfiguration()
+	for _, requirement := range requirements {
+		if slices.ContainsFunc(fetchConfiguration.contextualArguments, func(argumentPlan ContextualArgumentPlan) bool {
+			return argumentPlan.FieldRef == field.fieldRef && argumentPlan.ArgumentName == requirement.argumentName
+		}) {
+			continue
+		}
+
+		argumentPlan := ContextualArgumentPlan{
+			FieldRef:     field.fieldRef,
+			ArgumentName: requirement.argumentName,
+		}
+		if requirement.levels != nil {
+			argumentPlan.Capture = &resolve.ContextualArgumentCapture{Levels: requirement.levels}
+		}
+		fetchConfiguration.contextualArguments = append(fetchConfiguration.contextualArguments, argumentPlan)
+	}
+
+	c.setTypedFetchPath(fetchConfiguration)
+}
+
+// setTypedFetchPath scopes array elements to the type names of the inline fragment enclosing their path field,
+// so fetches under sibling fragments, which render different contextual values, never select each other's items.
+func (c *pathBuilderVisitor) setTypedFetchPath(fetchConfiguration *objectFetchConfiguration) {
+	if fetchConfiguration.hasTypedFetchPath {
+		return
+	}
+	fetchConfiguration.hasTypedFetchPath = true
+
+	fetchPath := fetchConfiguration.fetchItem.FetchPath
+	if len(fetchPath) == 0 {
+		return
+	}
+
+	typedFetchPath := slices.Clone(fetchPath)
+	element := 0
+	for i, ancestor := range c.walker.Ancestors {
+		if element == len(typedFetchPath) {
+			break
+		}
+		if ancestor.Kind != ast.NodeKindField {
+			continue
+		}
+		if typedFetchPath[element].Kind == resolve.FetchItemPathElementKindArray && i > 0 {
+			typedFetchPath[element].TypeNames = c.selectionSetTypeNames(c.walker.Ancestors[i-1].Ref)
+		}
+		element++
+	}
+
+	fetchConfiguration.fetchItem.FetchPath = typedFetchPath
+}
+
+func (c *pathBuilderVisitor) selectionSetTypeNames(selectionSetRef int) []string {
+	for _, info := range slices.Backward(c.selectionSetRefs) {
+		if info.ref == selectionSetRef {
+			return info.typeNames
+		}
+	}
+	return nil
 }
 
 func (c *pathBuilderVisitor) isPlannerDependenciesAllowsToPlanField(fieldRef int, currentPlannerIdx int) bool {
@@ -873,6 +955,17 @@ func (c *pathBuilderVisitor) planWithExistingPlanners(field *currentFieldInfo) (
 
 			// if we do have a conflict plan the field on a different planner
 			if plannerConfig.RequiredFields().HasArgumentConflictWith(requiresConfigurations) {
+				continue
+			}
+		}
+
+		if c.hasContextBoundary(fieldKey) {
+			// the items of the fetch have to be exactly the parent objects of the field,
+			// and the fetch has to run after the fetches resolving the context values
+			if plannerConfig.ParentPath() != field.parentPath && plannerConfig.ParentPath() != field.precedingParentPath {
+				continue
+			}
+			if !c.isPlannerDependenciesAllowsToPlanField(field.fieldRef, plannerIdx) {
 				continue
 			}
 		}

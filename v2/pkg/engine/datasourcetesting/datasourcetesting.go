@@ -35,6 +35,7 @@ type testOptions struct {
 	withDefer                      bool
 	validationOptions              []astvalidation.Option
 	withCalculateFieldDependencies bool
+	withoutValidation              bool
 }
 
 func WithDefer() func(*testOptions) {
@@ -106,6 +107,13 @@ func WithFetchReasons() func(*testOptions) {
 func WithValidationOptions(options ...astvalidation.Option) func(*testOptions) {
 	return func(o *testOptions) {
 		o.validationOptions = options
+	}
+}
+
+// WithoutValidation plans the operation without validating it against the definition.
+func WithoutValidation() func(*testOptions) {
+	return func(o *testOptions) {
+		o.withoutValidation = true
 	}
 }
 
@@ -224,8 +232,10 @@ func RunTestWithVariables(definition, operation, operationName, variables string
 		normalized := unsafeprinter.PrettyPrint(&op)
 		_ = normalized
 
-		valid := astvalidation.DefaultOperationValidator(opts.validationOptions...)
-		valid.Validate(&op, &def, &report)
+		if !opts.withoutValidation {
+			valid := astvalidation.DefaultOperationValidator(opts.validationOptions...)
+			valid.Validate(&op, &def, &report)
+		}
 
 		p, err := plan.NewPlanner(config)
 		require.NoError(t, err)

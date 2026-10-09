@@ -66,6 +66,11 @@ type addRequiredFieldsConfiguration struct {
 	// addTypenameInNestedSelections controls forced addition of __typename to nested selection sets
 	// used by "requires" keys, not only when fragments are present.
 	addTypenameInNestedSelections bool
+
+	// isContextInjection adds a context selection: every field is created fresh and stamped with deferInfo,
+	// and the injection root field gets contextAlias.
+	isContextInjection bool
+	contextAlias       []byte
 }
 
 // requiredFieldInfo holds pre-computed field properties shared across
@@ -317,12 +322,92 @@ func (v *requiredFieldsVisitor) EnterField(ref int) {
 		selectionSetRef: v.OperationNodes[len(v.OperationNodes)-1].Ref,
 	}
 
+	if v.config.isContextInjection {
+		v.handleContextField(fi)
+		return
+	}
+
 	if v.config.isKey {
 		v.handleKeyField(fi)
 		return
 	}
 
 	v.handleRequiredField(fi)
+}
+
+// handleContextField adds a field of a context selection. The root level __typename of an abstract level
+// is reused when it is in the owner's defer scope; every other field is added, never reused.
+func (v *requiredFieldsVisitor) handleContextField(fi requiredFieldInfo) {
+	if fi.isTypeName && v.config.allowTypename && v.isRootLevel() {
+		if !v.selectionSetHasTypeNameInDeferScope(fi.selectionSetRef) {
+			v.addTypenameSelection(fi.selectionSetRef)
+		}
+		return
+	}
+
+	var alias []byte
+	if v.isContextInjectionRoot() {
+		alias = v.config.contextAlias
+	}
+
+	field := ast.Field{
+		Name:         v.config.operation.Input.AppendInputBytes(fi.fieldName),
+		SelectionSet: ast.InvalidRef,
+	}
+	if alias != nil {
+		field.Alias = ast.Alias{
+			IsDefined: true,
+			Name:      v.config.operation.Input.AppendInputBytes(alias),
+		}
+	}
+	addedFieldNode := v.config.operation.AddField(field)
+
+	if v.key.FieldHasArguments(fi.ref) {
+		for _, arg := range v.importer.ImportArguments(v.key.Fields[fi.ref].Arguments.Refs, v.key, v.config.operation) {
+			v.config.operation.AddArgumentToField(addedFieldNode.Ref, arg)
+		}
+	}
+
+	v.config.operation.AddSelection(fi.selectionSetRef, ast.Selection{
+		Kind: ast.SelectionKindField,
+		Ref:  addedFieldNode.Ref,
+	})
+
+	v.skipFieldRefs = append(v.skipFieldRefs, addedFieldNode.Ref)
+	v.storeRequiredFieldRef(addedFieldNode.Ref)
+	v.applyDeferInternalDirective(addedFieldNode.Ref)
+
+	if !fi.isLeaf {
+		v.OperationNodes = append(v.OperationNodes, addedFieldNode)
+	}
+}
+
+// isContextInjectionRoot reports whether the current field is the top level field of the context selection,
+// or the field inside its top level inline fragment.
+func (v *requiredFieldsVisitor) isContextInjectionRoot() bool {
+	return v.isRootLevel() || (len(v.OperationNodes) == 3 && v.OperationNodes[1].Kind == ast.NodeKindInlineFragment)
+}
+
+func (v *requiredFieldsVisitor) selectionSetHasTypeNameInDeferScope(selectionSetRef int) bool {
+	deferID := 0
+	if v.config.deferInfo != nil {
+		deferID = v.config.deferInfo.ID
+	}
+
+	for _, selectionRef := range v.config.operation.SelectionSets[selectionSetRef].SelectionRefs {
+		selection := v.config.operation.Selections[selectionRef]
+		if selection.Kind != ast.SelectionKindField {
+			continue
+		}
+		if v.config.operation.FieldAliasIsDefined(selection.Ref) || !bytes.Equal(v.config.operation.FieldNameBytes(selection.Ref), typeNameFieldBytes) {
+			continue
+		}
+		if existingDeferID, _ := v.config.operation.FieldInternalDeferID(selection.Ref); existingDeferID == deferID {
+			return true
+		}
+	}
+
+	return false
 }
 
 // isRootLevel reports whether we are at the top of the required-fields selection
