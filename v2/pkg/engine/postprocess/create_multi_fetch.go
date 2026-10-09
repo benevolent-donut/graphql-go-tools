@@ -378,6 +378,15 @@ func (c *createMultiFetch) isCandidate(node *resolve.FetchTreeNode) bool {
 	return representationsFragmentIndex(fetch) != -1
 }
 
+func hasContextualArgumentVariable(variables resolve.Variables) bool {
+	for _, variable := range variables {
+		if _, ok := variable.(*resolve.ContextualArgumentVariable); ok {
+			return true
+		}
+	}
+	return false
+}
+
 var representationsFragmentPattern = regexp.MustCompile(`^\[\$\$(\d+)\$\$\]$`)
 
 // representationsFragmentIndex returns the index in SubgraphOperation.Variables

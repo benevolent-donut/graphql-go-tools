@@ -382,10 +382,14 @@ func (v *requiredFieldsVisitor) handleContextField(fi requiredFieldInfo) {
 	}
 }
 
-// isContextInjectionRoot reports whether the current field is the top level field of the context selection,
-// or the field inside its top level inline fragment.
 func (v *requiredFieldsVisitor) isContextInjectionRoot() bool {
-	return v.isRootLevel() || (len(v.OperationNodes) == 3 && v.OperationNodes[1].Kind == ast.NodeKindInlineFragment)
+	return v.isRootLevel() || v.isRootInlineFragmentLevel()
+}
+
+// isRootInlineFragmentLevel reports whether only the root selection set, a top level inline fragment
+// and its selection set are on the stack.
+func (v *requiredFieldsVisitor) isRootInlineFragmentLevel() bool {
+	return len(v.OperationNodes) == 3 && v.OperationNodes[1].Kind == ast.NodeKindInlineFragment
 }
 
 func (v *requiredFieldsVisitor) selectionSetHasTypeNameInDeferScope(selectionSetRef int) bool {

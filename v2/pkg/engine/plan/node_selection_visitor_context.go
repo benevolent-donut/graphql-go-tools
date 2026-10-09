@@ -34,8 +34,9 @@ type pendingContextInjection struct {
 	fieldSet      string
 	setterType    string
 	selection     string
-	alias         []byte // nil for the __typename of an abstract level
+	alias         []byte
 	abstract      bool
+	isTypename    bool // the __typename of an abstract level, which has no alias
 	ownerFieldRef int
 	deferInfo     *DeferInfo
 	requestedBy   []fieldIndexKey
@@ -60,7 +61,7 @@ func (c *nodeSelectionVisitor) handleFieldContextArguments(fieldCtx fieldRequire
 	}
 
 	// the parent can be selected on more data sources in later walks, so the boundary is checked until it is added
-	if _, added := c.contextKeyBoundaries[fieldKey]; !added && c.hasContextCandidate(fieldKey) {
+	if _, added := c.contextKeyBoundaries[fieldKey]; !added && hasContextCandidate(c.fieldContextRequirements[fieldKey]) {
 		c.addContextKeyBoundary(fieldCtx, fieldKey)
 	}
 }
@@ -90,8 +91,8 @@ func (c *nodeSelectionVisitor) planFieldContextArguments(fieldKey fieldIndexKey,
 	return true
 }
 
-func (c *nodeSelectionVisitor) hasContextCandidate(fieldKey fieldIndexKey) bool {
-	return slices.ContainsFunc(c.fieldContextRequirements[fieldKey], func(requirement contextualArgumentRequirement) bool {
+func hasContextCandidate(requirements []contextualArgumentRequirement) bool {
+	return slices.ContainsFunc(requirements, func(requirement contextualArgumentRequirement) bool {
 		return len(requirement.levels) > 0
 	})
 }
@@ -341,7 +342,7 @@ func (c *nodeSelectionVisitor) contextSelectionPath(consumer fieldIndexKey, leve
 
 	pending := c.pendingContextInjections[level.targetSetRef]
 	for i := range pending {
-		if pending[i].alias != nil && pending[i].setterType == setter.TypeName && pending[i].selection == setter.SelectionSet && pending[i].abstract == abstract {
+		if !pending[i].isTypename && pending[i].setterType == setter.TypeName && pending[i].selection == setter.SelectionSet && pending[i].abstract == abstract {
 			pending[i].requestedBy = append(pending[i].requestedBy, consumer)
 			return append([]string{string(pending[i].alias)}, nestedPath...), true
 		}
@@ -561,7 +562,7 @@ func (c *nodeSelectionVisitor) selectionSetHasResponseName(selectionSetRef int, 
 // which the loader uses to match setters.
 func (c *nodeSelectionVisitor) queueContextLevelTypename(level contextPathLevel) {
 	for _, pending := range c.pendingContextInjections[level.targetSetRef] {
-		if pending.alias == nil {
+		if pending.isTypename {
 			return
 		}
 	}
@@ -569,6 +570,7 @@ func (c *nodeSelectionVisitor) queueContextLevelTypename(level contextPathLevel)
 	c.queueContextInjection(level.targetSetRef, pendingContextInjection{
 		typeName:      level.typeName,
 		abstract:      true,
+		isTypename:    true,
 		ownerFieldRef: level.ownerFieldRef,
 		deferInfo:     c.ownerDeferInfo(level.ownerFieldRef),
 	})
@@ -606,7 +608,7 @@ func (c *nodeSelectionVisitor) processPendingContextInjections(selectionSetRef i
 			operation:                c.operation,
 			definition:               c.definition,
 			operationSelectionSetRef: selectionSetRef,
-			allowTypename:            injection.alias == nil,
+			allowTypename:            injection.isTypename,
 			typeName:                 injection.typeName,
 			fieldSet:                 injection.fieldSet,
 			deferInfo:                injection.deferInfo,

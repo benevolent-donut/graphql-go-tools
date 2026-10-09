@@ -136,15 +136,6 @@ func (d *createConcreteSingleFetchTypes) createEntityFetch(fetch *resolve.Single
 	}
 }
 
-func hasContextualArgumentVariable(variables resolve.Variables) bool {
-	for _, variable := range variables {
-		if _, ok := variable.(*resolve.ContextualArgumentVariable); ok {
-			return true
-		}
-	}
-	return false
-}
-
 func contextualArgumentCaptures(variables resolve.Variables) []resolve.ContextualArgumentCapture {
 	var captures []resolve.ContextualArgumentCapture
 	for _, variable := range variables {
