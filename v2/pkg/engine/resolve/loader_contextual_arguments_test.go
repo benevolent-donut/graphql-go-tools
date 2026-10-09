@@ -153,6 +153,23 @@ func contextualUsersFetch(fetchID int, ds DataSource, captures ...ContextualArgu
 	}
 }
 
+// contextualUserEntityFetch is the entity fetch of the users subgraph for one user, with the queue capture.
+func contextualUserEntityFetch(ds DataSource) *EntityFetch {
+	return &EntityFetch{
+		FetchDependencies: FetchDependencies{FetchID: 1},
+		Input: EntityInput{
+			Header:      contextualUsersHeader(),
+			Item:        contextualUserRepresentation(),
+			SkipErrItem: true,
+			Footer:      contextualUsersFooter([]ContextualArgumentCapture{queueContextualCapture}),
+		},
+		DataSource:          ds,
+		PostProcessing:      PostProcessingConfiguration{SelectResponseDataPath: []string{"data", "_entities", "0"}, SelectResponseErrorsPath: []string{"errors"}},
+		Info:                contextualUsersInfo(),
+		ContextualArguments: []ContextualArgumentCapture{queueContextualCapture},
+	}
+}
+
 // contextualUsersRequest is the request of the users fetch for the user ids, followed by the rendered variables.
 func contextualUsersRequest(variables string, ids ...string) string {
 	representations := make([]string, len(ids))
@@ -174,6 +191,10 @@ var queueContextualCapture = staticContextualCapture("contextualArgument_0", 1, 
 
 func flaggedUsersFetch(fetch Fetch) *FetchTreeNode {
 	return SingleWithPath(fetch, "moderationQueues.@.flaggedUsers", ArrayPath("moderationQueues"), ArrayPath("flaggedUsers"))
+}
+
+func queueOwnerFetch(fetch Fetch) *FetchTreeNode {
+	return Single(fetch, ObjectPath("moderationQueue"), ObjectPath("owner"))
 }
 
 func newContextualLoader(data string) *Loader {
@@ -456,22 +477,9 @@ func TestContextualArgumentCapture(t *testing.T) {
 
 	t.Run("an entity fetch renders the value of its single item", func(t *testing.T) {
 		users := newContextualUsersDataSource("contextualArgument_0")
-		fetch := &EntityFetch{
-			FetchDependencies: FetchDependencies{FetchID: 1},
-			Input: EntityInput{
-				Header:      contextualUsersHeader(),
-				Item:        contextualUserRepresentation(),
-				SkipErrItem: true,
-				Footer:      contextualUsersFooter([]ContextualArgumentCapture{queueContextualCapture}),
-			},
-			DataSource:          users,
-			PostProcessing:      PostProcessingConfiguration{SelectResponseDataPath: []string{"data", "_entities", "0"}, SelectResponseErrorsPath: []string{"errors"}},
-			Info:                contextualUsersInfo(),
-			ContextualArguments: []ContextualArgumentCapture{queueContextualCapture},
-		}
 		data := `{"moderationQueue":{"__context_0":true,"owner":{"__typename":"User","id":"u1"}}}`
 
-		out := loadContextual(t, NewContext(t.Context()), data, Single(fetch, ObjectPath("moderationQueue"), ObjectPath("owner")))
+		out := loadContextual(t, NewContext(t.Context()), data, queueOwnerFetch(contextualUserEntityFetch(users)))
 
 		assert.ElementsMatch(t, []string{contextualUsersRequest(`,"contextualArgument_0":true`, "u1")}, users.recordedRequests())
 		assert.Equal(t, `{"data":{"moderationQueue":{"__context_0":true,"owner":{"__typename":"User","id":"u1","profile":"u1:true"}}}}`, out)
@@ -1053,6 +1061,94 @@ func TestContextualArgumentResponseCache(t *testing.T) {
 			`{"__context_0":false,"flaggedUsers":[{"__typename":"User","id":"u1","profile":"u1:false"}]}]}}`, out)
 	})
 
+	t.Run("an entity fetch keys the cache by its value", func(t *testing.T) {
+		cache := newTestCache()
+		users := cachedUsers()
+		run := func(value string) string {
+			data := `{"moderationQueue":{"__context_0":` + value + `,"owner":{"__typename":"User","id":"u1"}}}`
+			return loadContextual(t, cachedContext(t, cache), data, queueOwnerFetch(contextualUserEntityFetch(users)))
+		}
+
+		first, second, third := run("true"), run("false"), run("true")
+
+		assert.Equal(t, []string{
+			contextualUsersRequest(`,"contextualArgument_0":true`, "u1"),
+			contextualUsersRequest(`,"contextualArgument_0":false`, "u1"),
+		}, users.recordedRequests())
+		assert.Len(t, cache.items, 2)
+		assert.Contains(t, first, `"profile":"u1:true"`)
+		assert.Contains(t, second, `"profile":"u1:false"`)
+		assert.Equal(t, first, third)
+	})
+
+	t.Run("a value rendered in the header is part of the key", func(t *testing.T) {
+		cache := newTestCache()
+		users := cachedUsers()
+		headerFetch := func() *BatchEntityFetch {
+			fetch := contextualUsersFetch(1, users, queueContextualCapture)
+			fetch.Input.Header = InputTemplate{
+				Segments: []TemplateSegment{
+					contextualStatic(`{"method":"POST","url":"http://users","body":{"query":"` + contextualUsersQuery + `","variables":{"contextualArgument_0":`),
+					(&ContextualArgumentVariable{Capture: queueContextualCapture}).TemplateSegment(),
+					contextualStatic(`,"representations":[`),
+				},
+				SetTemplateOutputToNullOnVariableNull: true,
+			}
+			fetch.Input.Footer = InputTemplate{Segments: []TemplateSegment{contextualStatic(`]}}}`)}, SetTemplateOutputToNullOnVariableNull: true}
+			return fetch
+		}
+		headerRequest := func(value, id string) string {
+			return `{"method":"POST","url":"http://users","body":{"query":"` + contextualUsersQuery + `","variables":{"contextualArgument_0":` + value + `,"representations":[{"__typename":"User","id":"` + id + `"}]}}}`
+		}
+		data := contextualQueuesWithValues("true", "null")
+
+		first := loadContextual(t, cachedContext(t, cache), data, flaggedUsersFetch(headerFetch()))
+		second := loadContextual(t, cachedContext(t, cache), data, flaggedUsersFetch(headerFetch()))
+
+		assert.ElementsMatch(t, []string{headerRequest("true", "u0"), headerRequest("null", "u1")}, users.recordedRequests())
+		assert.Len(t, cache.items, 2)
+		assert.Equal(t, first, second)
+		assert.Contains(t, first, `{"__typename":"User","id":"u0","profile":"u0:true"}`)
+		assert.Contains(t, first, `{"__typename":"User","id":"u1","profile":"u1:null"}`)
+	})
+
+	t.Run("swapped values of two captures give two keys", func(t *testing.T) {
+		captures := []ContextualArgumentCapture{
+			queueContextualCapture,
+			staticContextualCapture("contextualArgument_1", 1, "ModerationQueue", "__context_1"),
+		}
+		cache := newTestCache()
+		users := newContextualUsersDataSource("contextualArgument_0", "contextualArgument_1")
+		users.cacheControl = "max-age=60"
+		run := func(first, second string) string {
+			data := `{"moderationQueues":[{"__context_0":` + first + `,"__context_1":` + second + `,"flaggedUsers":[{"__typename":"User","id":"u1"}]}]}`
+			return loadContextual(t, cachedContext(t, cache), data, flaggedUsersFetch(contextualUsersFetch(1, users, captures...)))
+		}
+
+		trueFalse, falseTrue, trueFalseAgain := run("true", "false"), run("false", "true"), run("true", "false")
+
+		assert.Equal(t, []string{
+			contextualUsersRequest(`,"contextualArgument_0":true,"contextualArgument_1":false`, "u1"),
+			contextualUsersRequest(`,"contextualArgument_0":false,"contextualArgument_1":true`, "u1"),
+		}, users.recordedRequests())
+		assert.Len(t, cache.items, 2)
+		assert.Contains(t, trueFalse, `"profile":"u1:true:false"`)
+		assert.Contains(t, falseTrue, `"profile":"u1:false:true"`)
+		assert.Equal(t, trueFalse, trueFalseAgain)
+	})
+}
+
+// doneSignalContext closes called the first time Done is called, which a singleflight follower does when it waits for its leader.
+type doneSignalContext struct {
+	context.Context
+
+	called chan struct{}
+	once   sync.Once
+}
+
+func (c *doneSignalContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.called) })
+	return c.Context.Done()
 }
 
 func TestContextualArgumentSubgraphSingleflight(t *testing.T) {
@@ -1096,6 +1192,42 @@ func TestContextualArgumentSubgraphSingleflight(t *testing.T) {
 		assert.Contains(t, outputs[1], `"profile":"u1:false"`)
 	})
 
+	t.Run("two concurrent requests whose setters are equal share one upstream call", func(t *testing.T) {
+		// The first request holds its flight until the second one waits for it, which the context of the second one's load reports.
+		waiting := make(chan struct{})
+		arrived := make(chan struct{}, 2)
+		users := newContextualUsersDataSource("contextualArgument_0")
+		users.onRequest = func(string) {
+			arrived <- struct{}{}
+			select {
+			case <-waiting:
+			case <-time.After(10 * time.Second):
+			}
+		}
+		singleFlight := NewSingleFlight(1)
+		outputs := make([]string, 2)
+		var wg sync.WaitGroup
+		run := func(i int, ctx *Context) {
+			wg.Go(func() {
+				loader := newContextualLoader(`{"moderationQueues":[{"__context_0":true,"flaggedUsers":[{"__typename":"User","id":"u1"}]}]}`)
+				loader.singleFlight = singleFlight
+				outputs[i] = runContextualLoader(t, loader, ctx, flaggedUsersFetch(contextualUsersFetch(1, users, queueContextualCapture)))
+			})
+		}
+
+		run(0, NewContext(t.Context()))
+		<-arrived
+		follower := NewContext(t.Context())
+		follower.SetEngineLoaderHooks(&spyLoaderHooks{onLoad: func(ctx context.Context, _ DataSourceInfo) context.Context {
+			return &doneSignalContext{Context: ctx, called: waiting}
+		}})
+		run(1, follower)
+		wg.Wait()
+
+		assert.Equal(t, []string{contextualUsersRequest(`,"contextualArgument_0":true`, "u1")}, users.recordedRequests())
+		assert.Contains(t, outputs[0], `"profile":"u1:true"`)
+		assert.Contains(t, outputs[1], `"profile":"u1:true"`)
+	})
 }
 
 func TestContextualArgumentVariableWithoutGroupValues(t *testing.T) {
