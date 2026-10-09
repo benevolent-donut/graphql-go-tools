@@ -1311,6 +1311,32 @@ func TestExecutionEngine_ContextualArgumentsDefer(t *testing.T) {
 `,
 		},
 		{
+			name:  "deferred object consumer of a sibling fragment is delivered in its defer scope",
+			query: `{ queues { flaggedUsers { id } ... on ModerationQueue { flaggedUsers { profile { includeSuspended } } } ... on AppealQueue { flaggedUsers { ... @defer { profile { includeSuspended } } } } } }`,
+			exchanges: []contextualExchange{
+				{
+					subgraph: "moderation",
+					body:     `{"query":"{queues {__typename flaggedUsers {id} ... on ModerationQueue {flaggedUsers {__typename id} __context_0: includeSuspended} ... on AppealQueue {flaggedUsers {__internal_typename: __typename __typename id}}}}"}`,
+					response: `{"data":{"queues":[` +
+						`{"__typename":"ModerationQueue","flaggedUsers":[{"id":"u1","__typename":"User"},{"id":"u2","__typename":"User"}],"__context_0":true},` +
+						`{"__typename":"AppealQueue","flaggedUsers":[{"id":"u5","__internal_typename":"User","__typename":"User"}]}]}}`,
+				},
+				{
+					subgraph: "users",
+					body:     `{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $contextualArgument_0){includeSuspended}}}}","variables":{"representations":[{"__typename":"User","id":"u1"},{"__typename":"User","id":"u2"}],"contextualArgument_0":true}}`,
+					response: `{"data":{"_entities":[{"__typename":"User","profile":{"includeSuspended":true}},{"__typename":"User","profile":{"includeSuspended":true}}]}}`,
+				},
+				{
+					subgraph: "users",
+					body:     `{"query":"query($representations: [_Any!]!, $a: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $a){includeSuspended}}}}","variables":{"a":null,"representations":[{"__typename":"User","id":"u5"}]}}`,
+					response: `{"data":{"_entities":[{"__typename":"User","profile":{"includeSuspended":null}}]}}`,
+				},
+			},
+			expectedResponse: `{"data":{"queues":[{"flaggedUsers":[{"id":"u1","profile":{"includeSuspended":true}},{"id":"u2","profile":{"includeSuspended":true}}]},{"flaggedUsers":[{"id":"u5"}]}]},"pending":[{"id":"1","path":["queues"]}],"hasNext":true}
+{"incremental":[{"data":{"profile":{"includeSuspended":null}},"id":"1","subPath":[1,"flaggedUsers",0]}],"completed":[{"id":"1"}],"hasNext":false}
+`,
+		},
+		{
 			name:  "deferred consumer of a sibling fragment is delivered in its defer scope",
 			query: `{ queues { flaggedUsers { id } ... on ModerationQueue { flaggedUsers { viewerView } } ... on AppealQueue { flaggedUsers { ... @defer { viewerView } } } } }`,
 			exchanges: []contextualExchange{
