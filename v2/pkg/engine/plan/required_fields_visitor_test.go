@@ -25,6 +25,8 @@ func TestAddRequiredFields(t *testing.T) {
 		enforceTypenameForRequired   bool
 		deferInfo                    *DeferInfo
 		parentFieldDeferID           int
+		isContextInjection           bool
+		contextAlias                 string
 
 		// output
 		expectedOperation           string
@@ -485,6 +487,133 @@ func TestAddRequiredFields(t *testing.T) {
 				}`,
 			expectedSkipFieldsCount:     8, // id, account, __typename, id, type, settings, __typename, theme
 			expectedRequiredFieldsCount: 6,
+		},
+		{
+			name: "context selection gets the context alias and never reuses the client field",
+			definition: `
+				type Query { moderationQueue: ModerationQueue }
+				type ModerationQueue { id: ID! includeSuspended: Boolean! }`,
+			operation:          `query { moderationQueue { includeSuspended } }`,
+			typeName:           "ModerationQueue",
+			fieldSet:           "includeSuspended",
+			isContextInjection: true,
+			contextAlias:       "__context_0",
+			expectedOperation: `
+				query {
+					moderationQueue {
+						includeSuspended
+						__context_0: includeSuspended
+					}
+				}`,
+			expectedSkipFieldsCount:     1,
+			expectedRequiredFieldsCount: 1,
+			expectedRemappedPaths:       map[string]string{},
+		},
+		{
+			name: "context selection aliases only its root field and adds nested fields fresh",
+			definition: `
+				type Query { moderationQueue: ModerationQueue }
+				type ModerationQueue { id: ID! owner(active: Boolean): User }
+				type User { id: ID! }`,
+			operation:          `query { moderationQueue { owner(active: true) { id } } }`,
+			typeName:           "ModerationQueue",
+			fieldSet:           "owner(active: true) { id }",
+			selectionSetRef:    1,
+			isContextInjection: true,
+			contextAlias:       "__context_0",
+			expectedOperation: `
+				query {
+					moderationQueue {
+						owner(active: true) {
+							id
+						}
+						__context_0: owner(active: true) {
+							id
+						}
+					}
+				}`,
+			expectedSkipFieldsCount:     2,
+			expectedRequiredFieldsCount: 2,
+			expectedRemappedPaths:       map[string]string{},
+		},
+		{
+			name: "context selection under a deferred owner stamps every field with the owner's defer scope",
+			definition: `
+				type Query { moderationQueue: ModerationQueue }
+				type ModerationQueue { id: ID! owner: User }
+				type User { id: ID! }`,
+			operation:          `query { moderationQueue { id } }`,
+			typeName:           "ModerationQueue",
+			fieldSet:           "owner { id }",
+			deferInfo:          &DeferInfo{ID: 1, ParentID: 2},
+			isContextInjection: true,
+			contextAlias:       "__context_0",
+			expectedOperation: `
+				query {
+					moderationQueue {
+						id
+						__context_0: owner @__defer_internal(id: 1, parentDeferId: 2) {
+							id @__defer_internal(id: 1, parentDeferId: 2)
+						}
+					}
+				}`,
+			expectedSkipFieldsCount:     2,
+			expectedRequiredFieldsCount: 2,
+			expectedRemappedPaths:       map[string]string{},
+		},
+		{
+			name: "context selection at an abstract level reuses __typename of the same defer scope",
+			definition: `
+				type Query { queues: [Queue!]! }
+				interface Queue { id: ID! }
+				type ModerationQueue implements Queue { id: ID! includeSuspended: Boolean! }`,
+			operation:          `query { queues { __typename id } }`,
+			typeName:           "Queue",
+			fieldSet:           "... on ModerationQueue { includeSuspended }",
+			allowTypename:      true,
+			isContextInjection: true,
+			contextAlias:       "__context_0",
+			expectedOperation: `
+				query {
+					queues {
+						__typename
+						id
+						... on ModerationQueue {
+							__context_0: includeSuspended
+						}
+					}
+				}`,
+			expectedSkipFieldsCount:     1,
+			expectedRequiredFieldsCount: 1,
+			expectedRemappedPaths:       map[string]string{},
+		},
+		{
+			name: "context selection at an abstract level adds __typename in the owner's defer scope",
+			definition: `
+				type Query { queues: [Queue!]! }
+				interface Queue { id: ID! }
+				type ModerationQueue implements Queue { id: ID! includeSuspended: Boolean! }`,
+			operation:          `query { queues { __typename id } }`,
+			typeName:           "Queue",
+			fieldSet:           "... on ModerationQueue { includeSuspended }",
+			allowTypename:      true,
+			deferInfo:          &DeferInfo{ID: 1},
+			isContextInjection: true,
+			contextAlias:       "__context_0",
+			expectedOperation: `
+				query {
+					queues {
+						__typename
+						id
+						__typename @__defer_internal(id: 1)
+						... on ModerationQueue {
+							__context_0: includeSuspended @__defer_internal(id: 1)
+						}
+					}
+				}`,
+			expectedSkipFieldsCount:     2,
+			expectedRequiredFieldsCount: 1,
+			expectedRemappedPaths:       map[string]string{},
 		},
 		{
 			name: "key with defer id - new field added as plain (no alias needed)",
@@ -1143,6 +1272,10 @@ func TestAddRequiredFields(t *testing.T) {
 				deferInfo:                     tt.deferInfo,
 				parentFieldDeferID:            tt.parentFieldDeferID,
 				addTypenameInNestedSelections: tt.enforceTypenameForRequired,
+				isContextInjection:            tt.isContextInjection,
+			}
+			if tt.contextAlias != "" {
+				config.contextAlias = []byte(tt.contextAlias)
 			}
 
 			result, report := addRequiredFields(config)
