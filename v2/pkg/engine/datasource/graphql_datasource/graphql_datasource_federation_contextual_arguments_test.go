@@ -5,11 +5,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jensneuse/abstractlogger"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astnormalization"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/asttransform"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvalidation"
 	. "github.com/wundergraph/graphql-go-tools/v2/pkg/engine/datasourcetesting"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/plan"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/postprocess"
@@ -3202,6 +3205,128 @@ func TestGraphQLDataSourceFederation_ContextualArguments(t *testing.T) {
 				WithPostProcessor(postprocess.EnableMultiFetch()),
 			)
 		})
+	})
+}
+
+// contextualArgumentsPlanDroppingFactory registers its planners without the contextual argument plans of the path builder.
+type contextualArgumentsPlanDroppingFactory struct {
+	*Factory[Configuration]
+}
+
+func (f contextualArgumentsPlanDroppingFactory) Planner(logger abstractlogger.Logger) plan.DataSourcePlanner[Configuration] {
+	return contextualArgumentsPlanDroppingPlanner{f.Factory.Planner(logger).(*Planner[Configuration])}
+}
+
+type contextualArgumentsPlanDroppingPlanner struct {
+	*Planner[Configuration]
+}
+
+func (p contextualArgumentsPlanDroppingPlanner) Register(visitor *plan.Visitor, configuration plan.DataSourceConfiguration[Configuration], dataSourcePlannerConfiguration plan.DataSourcePlannerConfiguration) error {
+	dataSourcePlannerConfiguration.ContextualArguments = nil
+	return p.Planner.Register(visitor, configuration, dataSourcePlannerConfiguration)
+}
+
+// contextualArgumentsGuardConfiguration builds the same subgraph setter with the given planner factory, federation
+// setting and upstream profile field, to reach planning states that a composed configuration rules out.
+func contextualArgumentsGuardConfiguration(t *testing.T, factory plan.PlannerFactory[Configuration], federationEnabled bool, upstreamProfileField string) plan.Configuration {
+	usersSDL := `
+		type Query {
+			moderationQueue(id: ID!): ModerationQueue
+		}
+
+		type ModerationQueue @key(fields: "id") @context(name: "userScope") {
+			id: ID!
+			includeSuspended: Boolean!
+			flaggedUsers: [User!]!
+		}
+
+		type User @key(fields: "id") {
+			id: ID!
+			` + upstreamProfileField + `
+		}
+
+		type Profile {
+			displayName: String!
+		}
+	`
+
+	users, err := plan.NewDataSourceConfiguration[Configuration]("users", factory,
+		&plan.DataSourceMetadata{
+			RootNodes: []plan.TypeField{
+				{TypeName: "Query", FieldNames: []string{"moderationQueue"}},
+				{TypeName: "ModerationQueue", FieldNames: []string{"id", "includeSuspended", "flaggedUsers"}},
+				{TypeName: "User", FieldNames: []string{"id", "profile"}},
+			},
+			ChildNodes: []plan.TypeField{
+				{TypeName: "Profile", FieldNames: []string{"displayName"}},
+			},
+			FederationMetaData: plan.FederationMetaData{
+				Keys: plan.FederationFieldConfigurations{
+					{TypeName: "ModerationQueue", SelectionSet: "id"},
+					{TypeName: "User", SelectionSet: "id"},
+				},
+				ContextualArguments: plan.ContextualArgumentConfigurations{
+					{TypeName: "User", FieldName: "profile", ArgumentName: "includeSuspended", ContextName: "userScope", Setters: contextualArgumentsSetters("ModerationQueue")},
+				},
+			},
+		},
+		mustCustomConfiguration(t, ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: "http://users"},
+			SchemaConfiguration: mustSchema(t, &FederationConfiguration{Enabled: federationEnabled, ServiceSDL: usersSDL}, usersSDL),
+		}),
+	)
+	require.NoError(t, err)
+
+	return plan.Configuration{
+		DataSources:                  []plan.DataSource{users},
+		DisableResolveFieldPositions: true,
+		Fields: plan.FieldConfigurations{
+			{TypeName: "Query", FieldName: "moderationQueue", Arguments: plan.ArgumentsConfigurations{{Name: "id", SourceType: plan.FieldArgumentSource}}},
+			{TypeName: "User", FieldName: "profile", Arguments: plan.ArgumentsConfigurations{{Name: "includeSuspended", SourceType: plan.ContextualArgumentSource}}},
+		},
+	}
+}
+
+func contextualArgumentsPlanningError(t *testing.T, configuration plan.Configuration) string {
+	t.Helper()
+
+	definition := unsafeparser.ParseGraphqlDocumentString(contextualArgumentsSameSubgraphDefinition)
+	require.NoError(t, asttransform.MergeDefinitionWithBaseSchema(&definition))
+	operation := unsafeparser.ParseGraphqlDocumentString(`query Guard { moderationQueue(id: "q1") { flaggedUsers { profile { displayName } } } }`)
+
+	report := &operationreport.Report{}
+	astnormalization.NewWithOpts(
+		astnormalization.WithExtractVariables(),
+		astnormalization.WithInlineFragmentSpreads(),
+		astnormalization.WithRemoveFragmentDefinitions(),
+		astnormalization.WithRemoveUnusedVariables(),
+	).NormalizeOperation(&operation, &definition, report)
+	astvalidation.DefaultOperationValidator().Validate(&operation, &definition, report)
+	require.False(t, report.HasErrors(), report.Error())
+
+	planner, err := plan.NewPlanner(configuration)
+	require.NoError(t, err)
+	planner.Plan(&operation, &definition, "Guard", report)
+	require.True(t, report.HasErrors())
+	return report.Error()
+}
+
+func TestGraphQLDataSourceFederation_ContextualArgumentsPlanningGuards(t *testing.T) {
+	const profileField = `profile(includeSuspended: Boolean @fromContext(field: "$userScope { includeSuspended }")): Profile`
+
+	t.Run("a contextual argument without a plan stops planning", func(t *testing.T) {
+		configuration := contextualArgumentsGuardConfiguration(t, contextualArgumentsPlanDroppingFactory{&Factory[Configuration]{}}, true, profileField)
+		assert.Contains(t, contextualArgumentsPlanningError(t, configuration), "the contextual argument User.profile(includeSuspended:) was not planned")
+	})
+
+	t.Run("a captured argument outside an entity fetch stops planning", func(t *testing.T) {
+		configuration := contextualArgumentsGuardConfiguration(t, &Factory[Configuration]{}, false, profileField)
+		assert.Contains(t, contextualArgumentsPlanningError(t, configuration), "the contextual argument User.profile(includeSuspended:) is not planned in an entity fetch")
+	})
+
+	t.Run("an argument missing from the upstream schema stops planning", func(t *testing.T) {
+		configuration := contextualArgumentsGuardConfiguration(t, &Factory[Configuration]{}, true, `profile: Profile`)
+		assert.Contains(t, contextualArgumentsPlanningError(t, configuration), "the argument User.profile(includeSuspended:) is not defined in the upstream schema")
 	})
 }
 
