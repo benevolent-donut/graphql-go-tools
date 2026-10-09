@@ -1538,6 +1538,80 @@ func TestGraphQLDataSourceFederation_ContextualArguments(t *testing.T) {
 				WithoutValidation(),
 			)
 		})
+
+		t.Run("deferred field below a consumer deeper inside a fetch of its own subgraph", func(t *testing.T) {
+			RunWithPermutations(t, contextualArgumentsSameSubgraphDefinition, `
+				query DeferredBelowConsumer {
+					moderationQueue(id: "q1") {
+						flaggedUsers {
+							friends {
+								profile {
+									displayName
+								}
+								... @defer {
+									profile {
+										deferredName: displayName
+									}
+								}
+							}
+						}
+					}
+				}`,
+				"DeferredBelowConsumer",
+				&plan.DeferResponsePlan{
+					Response: &resolve.GraphQLDeferResponse{
+						DeferDescriptors: map[int]resolve.DeferDescriptor{
+							1: {ID: 1, Path: []string{"moderationQueue", "flaggedUsers"}},
+						},
+						Response: &resolve.GraphQLResponse{
+							Fetches: resolve.Sequence(
+								resolve.Single(contextualFetch(0, nil,
+									`{"method":"POST","url":"http://users","body":{"query":"query($a: ID!){moderationQueue(id: $a){flaggedUsers {friends {__typename id}} __context_0: includeSuspended}}","variables":{"a":$$0$$}}}`,
+									contextualClientVariable("a"),
+								)),
+								resolve.SingleWithPath(contextualEntityFetch(2, []int{0}, true,
+									`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $contextualArgument_0){displayName}}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+									contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_0")),
+									contextualRepresentation("User"),
+								), "moderationQueue.flaggedUsers.@.friends", resolve.ObjectPath("moderationQueue"), resolve.ArrayPath("flaggedUsers"), resolve.ArrayPath("friends")),
+							),
+							Data: &resolve.Object{
+								Fields: []*resolve.Field{
+									contextualField("moderationQueue", contextualQueue("moderationQueue", true,
+										contextualField("flaggedUsers", contextualUsers("flaggedUsers",
+											contextualField("friends", contextualUsers("friends",
+												contextualField("profile", contextualObject("profile", true, "Profile", []string{"Profile"},
+													contextualField("displayName", &resolve.String{Path: []string{"displayName"}}),
+													&resolve.Field{
+														Name:  []byte("deferredName"),
+														Defer: &resolve.DeferField{DeferID: 1},
+														Value: &resolve.String{Path: []string{"deferredName"}},
+													},
+												)),
+											)),
+										)),
+									)),
+								},
+							},
+						},
+						DeferTree: resolve.DeferSingle(&resolve.DeferFetchGroup{
+							DeferID: 1,
+							Fetches: resolve.Sequence(
+								resolve.SingleWithPath(contextualDeferredFetch(contextualEntityFetch(1, []int{0}, true,
+									`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $contextualArgument_0){deferredName: displayName}}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+									contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_0")),
+									contextualRepresentation("User"),
+								), 1), "moderationQueue.flaggedUsers.@.friends", resolve.ObjectPath("moderationQueue"), resolve.ArrayPath("flaggedUsers"), resolve.ArrayPath("friends")),
+							),
+						}),
+					},
+				},
+				planConfiguration,
+				WithDefaultPostProcessor(),
+				WithDefer(),
+				WithCalculateFieldDependencies(),
+			)
+		})
 	})
 
 	t.Run("candidate levels", func(t *testing.T) {

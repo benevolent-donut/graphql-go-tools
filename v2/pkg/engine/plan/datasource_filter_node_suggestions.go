@@ -177,7 +177,7 @@ func NewNodeSuggestionsWithSize(size int) *NodeSuggestions {
 	}
 }
 
-func (f *NodeSuggestions) ProcessDefer(fieldRequirementsConfigs map[fieldIndexKey][]FederationFieldConfiguration) {
+func (f *NodeSuggestions) ProcessDefer(fieldRequirementsConfigs map[fieldIndexKey][]FederationFieldConfiguration, contextKeyBoundaries map[fieldIndexKey]struct{}) {
 	for i := range f.items {
 		if !f.items[i].Selected {
 			continue
@@ -187,11 +187,11 @@ func (f *NodeSuggestions) ProcessDefer(fieldRequirementsConfigs map[fieldIndexKe
 			continue
 		}
 
-		f.propagateDeferParentsUpToRootNode(i, fieldRequirementsConfigs)
+		f.propagateDeferParentsUpToRootNode(i, fieldRequirementsConfigs, contextKeyBoundaries)
 	}
 }
 
-func (f *NodeSuggestions) propagateDeferParentsUpToRootNode(i int, fieldRequirementsConfigs map[fieldIndexKey][]FederationFieldConfiguration) {
+func (f *NodeSuggestions) propagateDeferParentsUpToRootNode(i int, fieldRequirementsConfigs map[fieldIndexKey][]FederationFieldConfiguration, contextKeyBoundaries map[fieldIndexKey]struct{}) {
 	// if the item is a root node and requires a key we are already able to jump from here,
 	// so we skip propagating defer id
 
@@ -255,6 +255,10 @@ func (f *NodeSuggestions) propagateDeferParentsUpToRootNode(i int, fieldRequirem
 		// if the node is a root node, but it doesn't require a key, we need to go up to the root query node,
 		// because it is an entity node within the query started from the root query node
 		if f.items[parentIdToUpdate].IsRootNode && f.items[parentIdToUpdate].requiresKey != nil {
+			break
+		}
+		// a consumer of contextual arguments jumps to its own entity fetch on the same datasource
+		if _, ok := contextKeyBoundaries[fieldIndexKey{fieldRef: f.items[parentIdToUpdate].FieldRef, dsHash: f.items[parentIdToUpdate].DataSourceHash}]; ok {
 			break
 		}
 
