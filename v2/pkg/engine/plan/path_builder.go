@@ -57,6 +57,7 @@ func (p *PathBuilder) CreatePlanningPaths(operation, definition *ast.Document, r
 	// set fields dependencies information
 	p.visitor.fieldDependsOn, p.visitor.fieldRequirementsConfigs =
 		p.selectionsConfig.fieldDependsOn, p.selectionsConfig.fieldRequirementsConfigs
+	p.visitor.fieldContextRequirements = p.selectionsConfig.fieldContextRequirements
 
 	p.visitor.secondaryRun = false
 	p.walker.Walk(operation, definition, report)
