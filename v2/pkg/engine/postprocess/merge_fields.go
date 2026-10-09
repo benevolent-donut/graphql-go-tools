@@ -125,7 +125,6 @@ func (m *mergeFields) traverseNode(node resolve.Node) {
 }
 
 func (m *mergeFields) canMergeScalars(left, right *resolve.Field) bool {
-	// a merged field is rendered only in the defer scope of the left field
 	if !m.sameDefer(left, right) {
 		return false
 	}
@@ -137,6 +136,8 @@ func (m *mergeFields) canMergeScalars(left, right *resolve.Field) bool {
 	return true
 }
 
+// sameDefer reports whether two fields belong to one defer scope, because a merged field is rendered only in the
+// defer scope of the left field.
 func (m *mergeFields) sameDefer(left, right *resolve.Field) bool {
 	if left.Defer == nil || right.Defer == nil {
 		return left.Defer == nil && right.Defer == nil
@@ -182,6 +183,9 @@ WithNext:
 
 func (m *mergeFields) fieldsCanMerge(left *resolve.Field, right *resolve.Field) bool {
 	if !bytes.Equal(left.Name, right.Name) {
+		return false
+	}
+	if !m.sameDefer(left, right) {
 		return false
 	}
 	if left.Value.NodeKind() != right.Value.NodeKind() {

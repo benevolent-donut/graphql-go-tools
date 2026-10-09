@@ -658,7 +658,7 @@ func (c *nodeSelectionVisitor) addContextKeyBoundary(fieldCtx fieldRequirementsC
 		return
 	}
 
-	key, ok := contextBoundaryKey(fieldCtx.dsConfig, fieldCtx.typeName)
+	key, ok := c.contextBoundaryKey(fieldCtx.dsConfig, fieldCtx.typeName)
 	if !ok {
 		return
 	}
@@ -681,28 +681,46 @@ func (c *nodeSelectionVisitor) addContextKeyBoundary(fieldCtx fieldRequirementsC
 	}, false)
 }
 
-func contextBoundaryKey(ds DataSource, typeName string) (FederationFieldConfiguration, bool) {
+func (c *nodeSelectionVisitor) contextBoundaryKey(ds DataSource, typeName string) (FederationFieldConfiguration, bool) {
 	for _, key := range ds.RequiredFieldsByKey(typeName) {
 		if err := key.parseSelectionSet(); err != nil {
 			continue
 		}
 		keyDocument := key.parsedSelectionSet
 
-		hasExternalField := false
-		for _, fieldSelectionRef := range keyDocument.SelectionSetFieldSelections(keyDocument.FragmentDefinitions[0].SelectionSet) {
-			fieldName := keyDocument.FieldNameString(keyDocument.Selections[fieldSelectionRef].Ref)
-			if ds.HasExternalRootNode(typeName, fieldName) || ds.HasExternalChildNode(typeName, fieldName) {
-				hasExternalField = true
-				break
-			}
-		}
-
-		if !hasExternalField {
+		if c.keySelectsOnlyLocalFields(ds, keyDocument, keyDocument.FragmentDefinitions[0].SelectionSet, typeName) {
 			return key, true
 		}
 	}
 
 	return FederationFieldConfiguration{}, false
+}
+
+func (c *nodeSelectionVisitor) keySelectsOnlyLocalFields(ds DataSource, key *ast.Document, selectionSetRef int, typeName string) bool {
+	for _, fieldSelectionRef := range key.SelectionSetFieldSelections(selectionSetRef) {
+		fieldRef := key.Selections[fieldSelectionRef].Ref
+		fieldName := key.FieldNameString(fieldRef)
+		if ds.HasExternalRootNode(typeName, fieldName) || ds.HasExternalChildNode(typeName, fieldName) {
+			return false
+		}
+		if !key.FieldHasSelections(fieldRef) {
+			continue
+		}
+
+		enclosingNode, ok := c.definition.NodeByNameStr(typeName)
+		if !ok {
+			return false
+		}
+		fieldTypeNode, ok := c.definition.FieldTypeNode(key.FieldNameBytes(fieldRef), enclosingNode)
+		if !ok {
+			return false
+		}
+		if !c.keySelectsOnlyLocalFields(ds, key, key.Fields[fieldRef].SelectionSet, c.definition.NodeNameString(fieldTypeNode)) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (c *nodeSelectionVisitor) pruneContextRequirements(isSelected func(fieldRef int, dsHash DSHash) bool) {
