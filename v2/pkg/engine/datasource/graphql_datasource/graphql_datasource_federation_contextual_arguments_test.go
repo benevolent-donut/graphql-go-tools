@@ -1984,6 +1984,88 @@ func TestGraphQLDataSourceFederation_ContextualArguments(t *testing.T) {
 				WithDefaultPostProcessor(),
 			)
 		})
+
+		t.Run("client field equal to a context selection is not reused", func(t *testing.T) {
+			RunWithPermutations(t, contextualArgumentsDefinition, `
+				query ClientContextAlias {
+					moderationQueue(id: "q1") {
+						__context_0: includeSuspended
+						flaggedUsers {
+							profile {
+								displayName
+							}
+						}
+					}
+				}`,
+				"ClientContextAlias",
+				&plan.SynchronousResponsePlan{
+					Response: &resolve.GraphQLResponse{
+						Fetches: resolve.Sequence(
+							resolve.Single(contextualFetch(0, nil,
+								`{"method":"POST","url":"http://moderation","body":{"query":"query($a: ID!){moderationQueue(id: $a){__context_0: includeSuspended flaggedUsers {__typename id} __context_0_1: includeSuspended}}","variables":{"a":$$0$$}}}`,
+								contextualClientVariable("a"),
+							)),
+							resolve.SingleWithPath(contextualEntityFetch(1, []int{0}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $contextualArgument_0){displayName}}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+								contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_0_1")),
+								contextualRepresentation("User"),
+							), "moderationQueue.flaggedUsers", resolve.ObjectPath("moderationQueue"), resolve.ArrayPath("flaggedUsers")),
+						),
+						Data: &resolve.Object{
+							Fields: []*resolve.Field{
+								contextualField("moderationQueue", contextualQueue("moderationQueue", true,
+									contextualField("__context_0", &resolve.Boolean{Path: []string{"__context_0"}}),
+									contextualField("flaggedUsers", contextualUsers("flaggedUsers", contextualProfile())),
+								)),
+							},
+						},
+					},
+				},
+				planConfiguration,
+				WithDefaultPostProcessor(),
+			)
+		})
+
+		t.Run("client field aliased like a context selection with a nested alias is not reused", func(t *testing.T) {
+			RunWithPermutations(t, contextualArgumentsDefinition, `
+				query NestedClientAlias {
+					moderationQueue(id: "q1") {
+						__context_0: flaggedUsers {
+							uid: id
+						}
+						flaggedUsers {
+							peers
+						}
+					}
+				}`,
+				"NestedClientAlias",
+				&plan.SynchronousResponsePlan{
+					Response: &resolve.GraphQLResponse{
+						Fetches: resolve.Sequence(
+							resolve.Single(contextualFetch(0, nil,
+								`{"method":"POST","url":"http://moderation","body":{"query":"query($a: ID!){moderationQueue(id: $a){__context_0: flaggedUsers {uid: id} flaggedUsers {__typename id} __context_0_1: flaggedUsers {id}}}","variables":{"a":$$0$$}}}`,
+								contextualClientVariable("a"),
+							)),
+							resolve.SingleWithPath(contextualEntityFetch(1, []int{0}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: [ID]){_entities(representations: $representations){... on User {__typename peers(ids: $contextualArgument_0)}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+								contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_0_1", "id")),
+								contextualRepresentation("User"),
+							), "moderationQueue.flaggedUsers", resolve.ObjectPath("moderationQueue"), resolve.ArrayPath("flaggedUsers")),
+						),
+						Data: &resolve.Object{
+							Fields: []*resolve.Field{
+								contextualField("moderationQueue", contextualQueue("moderationQueue", true,
+									contextualField("__context_0", contextualUsers("__context_0", contextualField("uid", &resolve.Scalar{Path: []string{"uid"}}))),
+									contextualField("flaggedUsers", contextualUsers("flaggedUsers", contextualField("peers", &resolve.String{Path: []string{"peers"}, Nullable: true}))),
+								)),
+							},
+						},
+					},
+				},
+				planConfiguration,
+				WithDefaultPostProcessor(),
+			)
+		})
 	})
 
 	t.Run("dependencies", func(t *testing.T) {
@@ -2547,6 +2629,69 @@ func TestGraphQLDataSourceFederation_ContextualArguments(t *testing.T) {
 							Fetches: resolve.Sequence(
 								resolve.Single(contextualDeferredFetch(contextualFetch(0, nil,
 									`{"method":"POST","url":"http://moderation","body":{"query":"query($a: ID!){moderationQueue(id: $a){includeSuspended}}","variables":{"a":$$0$$}}}`,
+									contextualClientVariable("a"),
+								), 1)),
+							),
+						}),
+					},
+				},
+				planConfiguration,
+				WithDefaultPostProcessor(),
+				WithDefer(),
+				WithCalculateFieldDependencies(),
+			)
+		})
+
+		t.Run("client field aliased like a context selection in a deferred fragment is not reused", func(t *testing.T) {
+			RunWithPermutations(t, contextualArgumentsDefinition, `
+				query DeferredClientAlias {
+					moderationQueue(id: "q1") {
+						... @defer {
+							__context_0: includeSuspended
+						}
+						flaggedUsers {
+							profile {
+								displayName
+							}
+						}
+					}
+				}`,
+				"DeferredClientAlias",
+				&plan.DeferResponsePlan{
+					Response: &resolve.GraphQLDeferResponse{
+						DeferDescriptors: map[int]resolve.DeferDescriptor{
+							1: {ID: 1, Path: []string{"moderationQueue"}},
+						},
+						Response: &resolve.GraphQLResponse{
+							Fetches: resolve.Sequence(
+								resolve.Single(contextualFetch(1, nil,
+									`{"method":"POST","url":"http://moderation","body":{"query":"query($a: ID!){moderationQueue(id: $a){flaggedUsers {__typename id} __context_0_1: includeSuspended}}","variables":{"a":$$0$$}}}`,
+									contextualClientVariable("a"),
+								)),
+								resolve.SingleWithPath(contextualEntityFetch(2, []int{1}, true,
+									`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $contextualArgument_0){displayName}}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+									contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_0_1")),
+									contextualRepresentation("User"),
+								), "moderationQueue.flaggedUsers", resolve.ObjectPath("moderationQueue"), resolve.ArrayPath("flaggedUsers")),
+							),
+							Data: &resolve.Object{
+								Fields: []*resolve.Field{
+									contextualField("moderationQueue", contextualQueue("moderationQueue", true,
+										&resolve.Field{
+											Name:  []byte("__context_0"),
+											Defer: &resolve.DeferField{DeferID: 1},
+											Value: &resolve.Boolean{Path: []string{"__context_0"}},
+										},
+										contextualField("flaggedUsers", contextualUsers("flaggedUsers", contextualProfile())),
+									)),
+								},
+							},
+						},
+						DeferTree: resolve.DeferSingle(&resolve.DeferFetchGroup{
+							DeferID: 1,
+							Fetches: resolve.Sequence(
+								resolve.Single(contextualDeferredFetch(contextualFetch(0, nil,
+									`{"method":"POST","url":"http://moderation","body":{"query":"query($a: ID!){moderationQueue(id: $a){__context_0: includeSuspended}}","variables":{"a":$$0$$}}}`,
 									contextualClientVariable("a"),
 								), 1)),
 							),

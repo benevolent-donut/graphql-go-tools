@@ -447,6 +447,10 @@ func (c *nodeSelectionVisitor) findContextFieldInSelectionSet(selectionSetRef in
 		if !bytes.HasPrefix(c.operation.FieldAliasBytes(selection.Ref), []byte(contextAliasPrefix)) {
 			continue
 		}
+		// a client field can use the same alias, for example in a deferred fragment, so only planner fields are reused
+		if !slices.Contains(c.skipFieldsRefs, selection.Ref) {
+			continue
+		}
 		if fieldRefs := c.matchContextField(selection.Ref, key, keyFieldRef); fieldRefs != nil {
 			return fieldRefs
 		}
