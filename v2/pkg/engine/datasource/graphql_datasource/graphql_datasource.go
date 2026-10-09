@@ -68,6 +68,7 @@ type Planner[T Configuration] struct {
 	upstreamVariablesList              []resolve.SubgraphVariable
 	recordUpstreamVariables            bool
 	representationsVariableNameCached  string
+	contextualArgumentCaptures         []resolve.ContextualArgumentCapture
 	nodes                              []ast.Node
 	variables                          resolve.Variables
 	lastFieldEnclosingTypeName         string
@@ -888,6 +889,7 @@ func (p *Planner[T]) EnterDocument(_, _ *ast.Document) {
 	p.upstreamVariablesList = nil
 	p.recordUpstreamVariables = p.dataSourcePlannerConfig.Options.EnableMultiFetch && p.config.grpc == nil
 	p.representationsVariableNameCached = ""
+	p.contextualArgumentCaptures = p.contextualArgumentCaptures[:0]
 	p.variables = p.variables[:0]
 	p.hasFederationRoot = false
 	p.queryPlan = nil
@@ -1212,6 +1214,8 @@ func (p *Planner[T]) configureArgument(upstreamFieldRef, downstreamFieldRef int,
 		p.configureFieldArgumentSource(upstreamFieldRef, downstreamFieldRef, argumentConfiguration)
 	case plan.ObjectFieldSource:
 		p.configureObjectFieldSource(upstreamFieldRef, downstreamFieldRef, fieldConfig, argumentConfiguration)
+	case plan.ContextualArgumentSource:
+		p.configureContextualArgument(upstreamFieldRef, downstreamFieldRef, fieldConfig, argumentConfiguration)
 	}
 
 	p.argTypeRef = -1
@@ -1395,6 +1399,95 @@ func (p *Planner[T]) configureObjectFieldSource(upstreamFieldRef, downstreamFiel
 	if !exists {
 		p.upstreamVariables, _ = p.setUpstreamVariable(p.upstreamVariables, string(variableName), []byte(objectVariableName))
 	}
+}
+
+// configureContextualArgument renders a contextual argument from the capture planned for the field,
+// or as null when no ancestor can set the context. A client value for the argument is never bound.
+func (p *Planner[T]) configureContextualArgument(upstreamFieldRef, downstreamFieldRef int, fieldConfig plan.FieldConfiguration, argumentConfiguration plan.ArgumentConfiguration) {
+	isContextual := slices.ContainsFunc(p.dataSourceConfig.ContextualArgumentsForField(fieldConfig.TypeName, fieldConfig.FieldName), func(argument plan.ContextualArgumentConfiguration) bool {
+		return argument.ArgumentName == argumentConfiguration.Name
+	})
+	if !isContextual {
+		return
+	}
+
+	planIdx := slices.IndexFunc(p.dataSourcePlannerConfig.ContextualArguments, func(argumentPlan plan.ContextualArgumentPlan) bool {
+		return argumentPlan.FieldRef == downstreamFieldRef && argumentPlan.ArgumentName == argumentConfiguration.Name
+	})
+	if planIdx == -1 {
+		p.stopWithError(errors.WithStack(fmt.Errorf("configureContextualArgument: the contextual argument %s.%s(%s:) was not planned", fieldConfig.TypeName, fieldConfig.FieldName, argumentConfiguration.Name)))
+		return
+	}
+	argumentPlan := p.dataSourcePlannerConfig.ContextualArguments[planIdx]
+
+	if argumentPlan.Capture == nil {
+		argumentRef := p.upstreamOperation.AddArgument(ast.Argument{
+			Name:  p.upstreamOperation.Input.AppendInputString(argumentConfiguration.Name),
+			Value: ast.Value{Kind: ast.ValueKindNull},
+		})
+		p.upstreamOperation.AddArgumentToField(upstreamFieldRef, argumentRef)
+		return
+	}
+
+	if !p.hasFederationRoot {
+		p.stopWithError(errors.WithStack(fmt.Errorf("configureContextualArgument: the contextual argument %s.%s(%s:) is not planned in an entity fetch", fieldConfig.TypeName, fieldConfig.FieldName, argumentConfiguration.Name)))
+		return
+	}
+
+	upstreamSchema, err := p.config.UpstreamSchema()
+	if err != nil {
+		p.stopWithError(errors.WithStack(fmt.Errorf("configureContextualArgument: failed to get upstream schema: %w", err)))
+		return
+	}
+
+	upstreamFieldName := fieldConfig.FieldName
+	if len(fieldConfig.Path) == 1 {
+		upstreamFieldName = fieldConfig.Path[0]
+	}
+	upstreamTypeName := p.visitor.Config.Types.RenameTypeNameOnMatchStr(fieldConfig.TypeName)
+
+	argumentDefinitionRef := ast.InvalidRef
+	if typeNode, ok := upstreamSchema.Index.FirstNodeByNameStr(upstreamTypeName); ok {
+		argumentDefinitionRef = upstreamSchema.NodeFieldDefinitionArgumentDefinitionByName(typeNode, []byte(upstreamFieldName), []byte(argumentConfiguration.Name))
+	}
+	if argumentDefinitionRef == ast.InvalidRef {
+		p.stopWithError(errors.WithStack(fmt.Errorf("configureContextualArgument: the argument %s.%s(%s:) is not defined in the upstream schema", upstreamTypeName, upstreamFieldName, argumentConfiguration.Name)))
+		return
+	}
+
+	capture := *argumentPlan.Capture
+	capture.VariableName = p.contextualArgumentVariableName(capture)
+
+	variableTemplate, exists := p.variables.AddVariable(&resolve.ContextualArgumentVariable{Capture: capture})
+	variableValueRef, argumentRef := p.upstreamOperation.AddVariableValueArgument([]byte(argumentConfiguration.Name), []byte(capture.VariableName))
+	p.upstreamOperation.AddArgumentToField(upstreamFieldRef, argumentRef)
+	if exists {
+		return
+	}
+
+	importedType := p.visitor.Importer.ImportType(upstreamSchema.InputValueDefinitionType(argumentDefinitionRef), upstreamSchema, p.upstreamOperation)
+	p.upstreamOperation.AddVariableDefinitionToOperationDefinition(p.nodes[0].Ref, variableValueRef, importedType)
+	p.upstreamVariables, _ = p.setUpstreamVariable(p.upstreamVariables, capture.VariableName, []byte(variableTemplate))
+}
+
+// contextualArgumentVariableName returns the same name for identical captures of the fetch,
+// so their arguments share one variable.
+func (p *Planner[T]) contextualArgumentVariableName(capture resolve.ContextualArgumentCapture) string {
+	for _, existing := range p.contextualArgumentCaptures {
+		capture.VariableName = existing.VariableName
+		if existing.Equals(&capture) {
+			return existing.VariableName
+		}
+	}
+
+	name := fmt.Sprintf("contextualArgument_%d", len(p.contextualArgumentCaptures))
+	for p.downstreamDeclaresVariable(name) {
+		name = "_" + name
+	}
+
+	capture.VariableName = name
+	p.contextualArgumentCaptures = append(p.contextualArgumentCaptures, capture)
+	return name
 }
 
 const (
