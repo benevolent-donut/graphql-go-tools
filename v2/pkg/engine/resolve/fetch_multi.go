@@ -113,6 +113,9 @@ type MultiEntityFetchEntry struct {
 	SkipNullItems        bool
 	SkipEmptyObjectItems bool
 	SkipErrItems         bool
+
+	// DeepCopyForSharedTargets is BatchEntityFetch.DeepCopyForSharedTargets for the entry.
+	DeepCopyForSharedTargets bool
 }
 
 type MultiEntityFetchVariable struct {

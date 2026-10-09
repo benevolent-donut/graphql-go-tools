@@ -156,6 +156,8 @@ type result struct {
 	// ]
 	batchStats   [][]*astjson.Value
 	fetchSkipped bool
+	// copyForSharedTargets merges a copy of an entity into every target of a batch after the first.
+	copyForSharedTargets bool
 
 	statusCode int
 	err        error
@@ -989,8 +991,15 @@ func (l *Loader) mergeResult(fetchItem *FetchItem, res *result, items []*astjson
 
 		for batchIndex, targets := range res.batchStats {
 			src := batch[batchIndex]
-			for _, target := range targets {
-				_, _, mErr := astjson.MergeValuesWithPath(l.jsonArena, target, src, res.postProcessing.MergePath...)
+			for i, target := range targets {
+				value := src
+				if res.copyForSharedTargets && i > 0 {
+					value, err = l.copyForSharedTarget(src)
+					if err != nil {
+						return errors.WithStack(err)
+					}
+				}
+				_, _, mErr := astjson.MergeValuesWithPath(l.jsonArena, target, value, res.postProcessing.MergePath...)
 				if mErr != nil {
 					return errors.WithStack(ErrMergeResult{
 						Subgraph: res.ds.Name,
@@ -1959,6 +1968,7 @@ var (
 
 func (l *Loader) prepareBatchEntityFetch(fetchItem *FetchItem, fetch *BatchEntityFetch, items []*astjson.Value, res *result, prepared *preparedFetch) error {
 	res.init(fetch.PostProcessing, fetch.Info)
+	res.copyForSharedTargets = fetch.DeepCopyForSharedTargets
 	res.tools = batchEntityToolPool.Get(len(items))
 	return l.prepareBatchEntityFetchGroup(fetchItem, fetch, items, nil, nil, res, prepared)
 }

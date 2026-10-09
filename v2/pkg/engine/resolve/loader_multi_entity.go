@@ -90,6 +90,7 @@ func (l *Loader) prepareMultiEntityFetch(fetchItem *FetchItem, fetch *MultiEntit
 		entry := &fetch.Input.Entries[k]
 		entryRes := &result{}
 		entryRes.init(entry.PostProcessing, entry.Info)
+		entryRes.copyForSharedTargets = entry.DeepCopyForSharedTargets
 		items := l.selectEntryTargets(entry)
 		entries[k] = preparedMultiEntry{entry: entry, items: items, res: entryRes}
 

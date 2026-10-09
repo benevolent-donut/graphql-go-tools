@@ -25,6 +25,7 @@ type Processor struct {
 	responseTreeProcessors *ResponseTreeProcessors
 	extractDeferFetches    *extractDeferFetches
 	buildDeferTree         *buildDeferTree
+	markSharedTargetCopies *markSharedTargetCopies
 }
 
 type FetchTreeProcessors struct {
@@ -291,6 +292,7 @@ func NewProcessor(options ...ProcessorOption) *Processor {
 		buildDeferTree: &buildDeferTree{
 			disable: opts.disableBuildDeferTree,
 		},
+		markSharedTargetCopies: &markSharedTargetCopies{},
 	}
 }
 
@@ -307,6 +309,7 @@ func (p *Processor) Process(pre plan.Plan) {
 		p.fetchTreeProcessors.processFlatFetchTree(t.Response)
 		p.fetchTreeProcessors.organizeFetchTree(t.Response.Fetches)
 		p.fetchTreeProcessors.processOrganizedFetchTree(t.Response.Fetches)
+		p.markSharedTargetCopies.Process(t.Response.Fetches)
 
 	case *plan.DeferResponsePlan:
 		p.responseTreeProcessors.mergeFields.Process(t.Response.Response.Data)
@@ -323,10 +326,13 @@ func (p *Processor) Process(pre plan.Plan) {
 
 		// process each deferred response fetch tree: same organize + merge/render/
 		// resolve/concretize pipeline as the initial response, per defer group.
+		roots := []*resolve.FetchTreeNode{t.Response.Response.Fetches}
 		for _, deferResp := range t.Response.Defers {
 			p.fetchTreeProcessors.organizeFetchTree(deferResp.Fetches)
 			p.fetchTreeProcessors.processOrganizedFetchTree(deferResp.Fetches)
+			roots = append(roots, deferResp.Fetches)
 		}
+		p.markSharedTargetCopies.Process(roots...)
 
 		// order defer fetches into parallel/sequence groups
 		p.buildDeferTree.Process(t.Response)
@@ -346,6 +352,7 @@ func (p *Processor) Process(pre plan.Plan) {
 
 		p.fetchTreeProcessors.organizeFetchTree(t.Response.Response.Fetches)
 		p.fetchTreeProcessors.processOrganizedFetchTree(t.Response.Response.Fetches)
+		p.markSharedTargetCopies.Process(t.Response.Response.Fetches)
 	}
 }
 

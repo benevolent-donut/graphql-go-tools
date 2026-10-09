@@ -469,6 +469,16 @@ func contextualStringField(name string) *Field {
 	return &Field{Name: []byte(name), Value: &String{Path: []string{name}, Nullable: true}}
 }
 
+func contextualRootFetch(data string) *SingleFetch {
+	return &SingleFetch{
+		FetchConfiguration: FetchConfiguration{
+			DataSource:     FakeDataSource(`{"data":` + data + `}`),
+			PostProcessing: PostProcessingConfiguration{SelectResponseDataPath: []string{"data"}},
+		},
+		InputTemplate: InputTemplate{Segments: []TemplateSegment{contextualStatic(`{"method":"POST","url":"http://moderation","body":{"query":"{moderationQueues}"}}`)}},
+	}
+}
+
 func TestContextualArgumentGrouping(t *testing.T) {
 	t.Run("two values two requests", func(t *testing.T) {
 		users := newContextualUsersDataSource("contextualArgument_0")
@@ -517,6 +527,56 @@ func TestContextualArgumentGrouping(t *testing.T) {
 		assert.Equal(t, []string{contextualUsersRequest(`,"contextualArgument_0":true`, "u1", "u2", "u4")}, contextual.recordedRequests())
 		assert.Equal(t, today.recordedRequests(), contextual.recordedRequests())
 		assert.Equal(t, todayOut, contextualOut)
+	})
+
+	t.Run("positions sharing nodes after batch dedupe keep their own values", func(t *testing.T) {
+		// The friends fetch deduplicates u2 across both queues, so without copies both u2 positions would share one friends list.
+		root := `{"moderationQueues":[` +
+			`{"id":"q1","__context_0":true,"flaggedUsers":[{"__typename":"User","id":"u1"},{"__typename":"User","id":"u2"}]},` +
+			`{"id":"q2","__context_0":false,"flaggedUsers":[{"__typename":"User","id":"u2"},{"__typename":"User","id":"u3"}]}]}`
+		friendsOf := map[string]string{"u1": `[{"__typename":"User","id":"u2"}]`, "u2": `[{"__typename":"User","id":"u3"}]`, "u3": `[]`}
+		expected := `{"data":{"moderationQueues":[` +
+			`{"id":"q1","flaggedUsers":[{"id":"u1","friends":[{"id":"u2","profile":"u2:true"}]},{"id":"u2","friends":[{"id":"u3","profile":"u3:true"}]}]},` +
+			`{"id":"q2","flaggedUsers":[{"id":"u2","friends":[{"id":"u3","profile":"u3:false"}]},{"id":"u3","friends":[]}]}]}}`
+
+		for _, withArena := range []bool{false, true} {
+			friends := &contextualEntitiesDataSource{entity: func(representation, _ *astjson.Value) string {
+				return `{"friends":` + friendsOf[string(representation.GetStringBytes("id"))] + `}`
+			}}
+			friendsFetch := contextualUsersFetch(1, friends)
+			friendsFetch.DeepCopyForSharedTargets = true
+			users := newContextualUsersDataSource("contextualArgument_0")
+			profiles := contextualUsersFetch(2, users, queueContextualCapture)
+			profiles.DependsOnFetchIDs = []int{1}
+			response := &GraphQLResponse{
+				Info: &GraphQLResponseInfo{OperationType: ast.OperationTypeQuery},
+				Fetches: Sequence(
+					Single(contextualRootFetch(root)),
+					flaggedUsersFetch(friendsFetch),
+					SingleWithPath(profiles, "moderationQueues.@.flaggedUsers.@.friends", ArrayPath("moderationQueues"), ArrayPath("flaggedUsers"), ArrayPath("friends")),
+				),
+				Data: &Object{Fields: []*Field{
+					contextualListField("moderationQueues", contextualStringField("id"),
+						contextualListField("flaggedUsers", contextualStringField("id"),
+							contextualListField("friends", contextualStringField("id"), contextualStringField("profile")))),
+				}},
+			}
+
+			r := newResolver(t.Context())
+			out := &bytes.Buffer{}
+			var err error
+			if withArena {
+				_, err = r.ArenaResolveGraphQLResponse(NewContext(t.Context()), response, out)
+			} else {
+				_, err = r.ResolveGraphQLResponse(NewContext(t.Context()), response, nil, out)
+			}
+			require.NoError(t, err)
+			assert.Equal(t, expected, out.String(), "arena: %v", withArena)
+			assert.ElementsMatch(t, []string{
+				contextualUsersRequest(`,"contextualArgument_0":true`, "u2", "u3"),
+				contextualUsersRequest(`,"contextualArgument_0":false`, "u3"),
+			}, users.recordedRequests(), "arena: %v", withArena)
+		}
 	})
 
 	t.Run("a failed group request skips the dependents of the fetch", func(t *testing.T) {
@@ -857,4 +917,22 @@ func TestContextualArgumentSubscription(t *testing.T) {
 			contextualUsersRequest(`,"contextualArgument_0":true`, "u1"),
 		}, users.recordedRequests())
 	})
+}
+
+func TestContextualArgumentSharedTargetCopies(t *testing.T) {
+	seed := `{"employees":[{"__typename":"Employee","id":1},{"__typename":"Employee","id":1}],"employee":{"__typename":"Employee","id":9}}`
+	productsOf := func(loader *Loader, i int) *astjson.Value {
+		return loader.dataBuffer.Get().Get("employees", strconv.Itoa(i), "products")
+	}
+
+	for _, copies := range []bool{false, true} {
+		f := multiFetchFixture(t, withSeed(seed))
+		f.fetch.Input.Entries[0].DeepCopyForSharedTargets = copies
+		f.fetch.DataSource = &recordingDataSource{response: []byte(`{"data":{"f1":[{"products":[{"upc":"1"}]}],"f2":[{"notes":"n"}]}}`)}
+
+		require.NoError(t, f.loader.resolveSingle(t.Context(), f.item))
+
+		assert.JSONEq(t, `[{"upc":"1"}]`, string(productsOf(f.loader, 1).MarshalTo(nil)))
+		assert.Equal(t, !copies, productsOf(f.loader, 0) == productsOf(f.loader, 1), "a multi entity entry shares its merged nodes unless it copies them, copies: %v", copies)
+	}
 }

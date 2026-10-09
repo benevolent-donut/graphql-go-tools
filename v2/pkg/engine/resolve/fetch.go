@@ -177,6 +177,9 @@ type BatchEntityFetch struct {
 	ContextualArguments  []ContextualArgumentCapture
 	// Traces holds one trace per value group when the fetch sends several requests; Trace holds the first.
 	Traces []*DataSourceLoadTrace
+	// DeepCopyForSharedTargets merges a copy of an entity into every target after the first,
+	// so positions below different context values never share response nodes.
+	DeepCopyForSharedTargets bool
 }
 
 func (b *BatchEntityFetch) Dependencies() *FetchDependencies {

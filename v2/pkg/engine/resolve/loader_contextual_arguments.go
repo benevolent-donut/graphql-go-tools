@@ -55,6 +55,7 @@ func (l *Loader) prepareContextualArgumentFetch(fetchItem *FetchItem, captures [
 		res.init(fetch.PostProcessing, fetch.Info)
 	case *BatchEntityFetch:
 		res.init(fetch.PostProcessing, fetch.Info)
+		res.copyForSharedTargets = fetch.DeepCopyForSharedTargets
 		prepared.batchFetch = true
 	}
 	res.tools = batchEntityToolPool.Get(len(items))
@@ -116,6 +117,7 @@ func (l *Loader) prepareContextualArgumentGroups(fetchItem *FetchItem, fetch *Ba
 	for i := range groups {
 		groupRes := &result{}
 		groupRes.init(fetch.PostProcessing, fetch.Info)
+		groupRes.copyForSharedTargets = fetch.DeepCopyForSharedTargets
 		group := &preparedFetch{item: fetchItem, items: items, res: groupRes, batchFetch: true}
 		if tracing {
 			group.trace = l.contextualArgumentGroupTrace(items, groups[i].spans)
@@ -235,6 +237,15 @@ func (l *Loader) mergeContextualArgumentGroups(prepared *preparedFetch) error {
 		l.callOnFinished(group.res)
 	}
 	return firstErr
+}
+
+// copyForSharedTarget copies an entity for every merge target after the first.
+func (l *Loader) copyForSharedTarget(value *astjson.Value) (*astjson.Value, error) {
+	if l.jsonArena != nil {
+		return astjson.DeepCopy(l.jsonArena, value), nil
+	}
+	// Without an arena, DeepCopy returns the value itself.
+	return astjson.ParseBytes(value.MarshalTo(nil))
 }
 
 // contextualArgumentRun is a run of consecutive items whose nearest setters set the same values.
