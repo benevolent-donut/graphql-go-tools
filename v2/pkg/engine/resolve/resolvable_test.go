@@ -231,6 +231,46 @@ func TestResolvable_ResolveWithErrorBubbleUp(t *testing.T) {
 	assert.Equal(t, `{"errors":[{"message":"Cannot return null for non-nullable field 'Query.topProducts.reviews.author.name'.","path":["topProducts",0,"reviews",0,"author","name"]}],"data":{"topProducts":[{"name":"Table","stock":8,"reviews":[{"body":"Love Table!","author":null},{"body":"Prefer other Table.","author":{"name":"user-2"}}]},{"name":"Couch","stock":2,"reviews":[{"body":"Couch Too expensive.","author":{"name":"user-1"}}]},{"name":"Chair","stock":5,"reviews":[{"body":"Chair Could be better.","author":{"name":"user-2"}}]}]}}`, out.String())
 }
 
+func TestResolvable_ResolveWithErrorBubbleUpToNullableInnerList(t *testing.T) {
+	res := NewResolvable(nil, ResolvableOptions{})
+	err := res.Init(&Context{}, []byte(`{"pages":[[{"id":"1","name":"a"},{"id":"2"}],[{"id":"3","name":"c"}]]}`), ast.OperationTypeQuery)
+	assert.NoError(t, err)
+	object := &Object{
+		Fields: []*Field{
+			{
+				Name: []byte("pages"),
+				Value: &Array{
+					Path: []string{"pages"},
+					Item: &Array{
+						Nullable: true,
+						Item: &Object{
+							Fields: []*Field{
+								{
+									Name: []byte("id"),
+									Value: &String{
+										Path: []string{"id"},
+									},
+								},
+								{
+									Name: []byte("name"),
+									Value: &String{
+										Path: []string{"name"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	out := &bytes.Buffer{}
+	err = res.Resolve(context.Background(), object, nil, out)
+	assert.NoError(t, err)
+	assert.Equal(t, `{"errors":[{"message":"Cannot return null for non-nullable field 'Query.pages.name'.","path":["pages",0,1,"name"]}],"data":{"pages":[null,[{"id":"3","name":"c"}]]}}`, out.String())
+}
+
 func TestResolvable_ResolveUnresolvableObject(t *testing.T) {
 	// The response shape of the unresolvable object mirrors a plan where the field selections
 	// were dropped during rewrites, e.g. { a { field } } where a returns an interface

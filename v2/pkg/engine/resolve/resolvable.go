@@ -1538,10 +1538,12 @@ func (r *Resolvable) fieldNodeKindAllowsSeek(field *Field) bool {
 			return false
 		}
 
-		// Skip array if its item type is not an object kind.
-		if field.Value.(*Array).Item.NodeKind() != NodeKindObject {
-			// we could have a nested array,
-			// but we do not care for now
+		// Skip array if its innermost item type is not an object kind.
+		item := field.Value.(*Array).Item
+		for item.NodeKind() == NodeKindArray {
+			item = item.(*Array).Item
+		}
+		if item.NodeKind() != NodeKindObject {
 			return false
 		}
 	}
@@ -1919,11 +1921,11 @@ func (r *Resolvable) walkArray(arr *Array, value *astjson.Value) bool {
 		err := r.walkNode(arr.Item, arrayValue)
 		r.popArrayPathElement()
 		if err {
-			if arr.Item.NodeKind() == NodeKindObject && arr.Item.NodeNullable() {
+			if itemKind := arr.Item.NodeKind(); (itemKind == NodeKindObject || itemKind == NodeKindArray) && arr.Item.NodeNullable() {
 				value.SetArrayItem(r.astjsonArena, i, astjson.NullValue)
 				continue
 			}
-			if arr.Nullable {
+			if arr.Nullable && len(arr.Path) > 0 {
 				astjson.SetNull(r.astjsonArena, parent, arr.Path...)
 				return false
 			}

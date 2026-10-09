@@ -713,7 +713,11 @@ func selectItems(a arena.Arena, items []*astjson.Value, element FetchItemPathEle
 			return nil
 		}
 		if field.Type() == astjson.TypeArray {
-			return field.GetArray()
+			arr := field.GetArray()
+			if isArrayOfArrays(arr) {
+				return appendFlattened(a, arena.AllocateSlice[*astjson.Value](a, 0, len(arr)), arr)
+			}
+			return arr
 		}
 		return []*astjson.Value{field}
 	}
@@ -727,12 +731,39 @@ func selectItems(a arena.Arena, items []*astjson.Value, element FetchItemPathEle
 			continue
 		}
 		if field.Type() == astjson.TypeArray {
-			selected = arena.SliceAppend(a, selected, field.GetArray()...)
+			arr := field.GetArray()
+			if isArrayOfArrays(arr) {
+				selected = appendFlattened(a, selected, arr)
+				continue
+			}
+			selected = arena.SliceAppend(a, selected, arr...)
 			continue
 		}
 		selected = arena.SliceAppend(a, selected, field)
 	}
 	return selected
+}
+
+// isArrayOfArrays checks only the first non-null element because GraphQL lists are homogeneous.
+func isArrayOfArrays(arr []*astjson.Value) bool {
+	for _, v := range arr {
+		if astjson.ValueIsNonNull(v) {
+			return v.Type() == astjson.TypeArray
+		}
+	}
+	return false
+}
+
+// appendFlattened flattens nested lists down to their items, since a fetch path has one element per list field whatever its list depth.
+func appendFlattened(a arena.Arena, dst, arr []*astjson.Value) []*astjson.Value {
+	for _, v := range arr {
+		if v != nil && v.Type() == astjson.TypeArray {
+			dst = appendFlattened(a, dst, v.GetArray())
+			continue
+		}
+		dst = arena.SliceAppend(a, dst, v)
+	}
+	return dst
 }
 
 func (l *Loader) itemsData(items []*astjson.Value) *astjson.Value {
