@@ -665,6 +665,38 @@ func TestContextualArgumentGrouping(t *testing.T) {
 		assert.Contains(t, out, `Reason: the entities need 101 requests for distinct contextual argument values, which exceeds the limit of 100.`)
 	})
 
+	t.Run("equal values in separate setter objects share one request", func(t *testing.T) {
+		users := newContextualUsersDataSource("contextualArgument_0")
+
+		out := loadContextual(t, NewContext(t.Context()), contextualQueuesWithValues("1", "1", "2", "1"), flaggedUsersFetch(contextualUsersFetch(1, users, queueContextualCapture)))
+
+		assert.ElementsMatch(t, []string{
+			contextualUsersRequest(`,"contextualArgument_0":1`, "u0", "u1", "u3"),
+			contextualUsersRequest(`,"contextualArgument_0":2`, "u2"),
+		}, users.recordedRequests())
+		assert.Contains(t, out, `{"__typename":"User","id":"u3","profile":"u3:1"}`)
+	})
+
+	t.Run("groups that render only null representations send nothing", func(t *testing.T) {
+		data := `{"moderationQueues":[{"__context_0":1,"flaggedUsers":[null]},{"__context_0":2,"flaggedUsers":[null,null]}]}`
+		for _, tracing := range []bool{false, true} {
+			users := newContextualUsersDataSource("contextualArgument_0")
+			ctx := NewContext(t.Context())
+			ctx.TracingOptions = TraceOptions{Enable: tracing, ExcludeLoadStats: true, EnablePredictableDebugTimings: true}
+			fetch := contextualUsersFetch(1, users, queueContextualCapture)
+
+			out := loadContextual(t, ctx, data, flaggedUsersFetch(fetch))
+
+			assert.Empty(t, users.recordedRequests(), "tracing: %v", tracing)
+			assert.Equal(t, `{"data":`+data+`}`, out, "tracing: %v", tracing)
+			if tracing {
+				require.Len(t, fetch.Traces, 2)
+				assert.True(t, fetch.Traces[0].LoadSkipped)
+				assert.True(t, fetch.Traces[1].LoadSkipped)
+			}
+		}
+	})
+
 	t.Run("rate limiter is called once for three groups", func(t *testing.T) {
 		limiter := &testRateLimiter{allowFn: func(*Context, *FetchInfo, json.RawMessage) (*RateLimitDeny, error) { return nil, nil }}
 		ctx := NewContext(t.Context())
@@ -709,6 +741,81 @@ func (f *failingContextualDataSource) Load(ctx context.Context, headers http.Hea
 		return nil, errors.New("subgraph unavailable")
 	}
 	return data, err
+}
+
+// scoreErrorsDataSource reports an error for the score of the entities at indices in the responses to the requests that contain when.
+type scoreErrorsDataSource struct {
+	*contextualEntitiesDataSource
+
+	when    string
+	indices []int
+}
+
+func (d *scoreErrorsDataSource) Load(ctx context.Context, headers http.Header, input []byte) ([]byte, error) {
+	out, err := d.contextualEntitiesDataSource.Load(ctx, headers, input)
+	if err != nil || !strings.Contains(string(input), d.when) {
+		return out, err
+	}
+	errs := make([]string, len(d.indices))
+	for i, index := range d.indices {
+		errs[i] = `{"message":"score failed","path":["_entities",` + strconv.Itoa(index) + `,"score"]}`
+	}
+	return append(out[:len(out)-1], `,"errors":[`+strings.Join(errs, ",")+`]}`...), nil
+}
+
+func (d *scoreErrorsDataSource) LoadWithFiles(ctx context.Context, headers http.Header, input []byte, _ []*httpclient.FileUpload) ([]byte, error) {
+	return d.Load(ctx, headers, input)
+}
+
+func TestContextualArgumentTaintedEntities(t *testing.T) {
+	requiresScore := []FetchReason{{TypeName: "User", FieldName: "score", IsRequires: true, Nullable: true}}
+
+	t.Run("entities tainted by an earlier fetch are left out of their runs", func(t *testing.T) {
+		// The earlier fetch fails the score of u1, the last entity of the first run, and of u2, the first entity of the second run.
+		data := `{"moderationQueues":[` +
+			`{"__context_0":true,"flaggedUsers":[{"__typename":"User","id":"u0"},{"__typename":"User","id":"u1"}]},` +
+			`{"__context_0":false,"flaggedUsers":[{"__typename":"User","id":"u2"},{"__typename":"User","id":"u3"}]},` +
+			`{"__context_0":true,"flaggedUsers":[{"__typename":"User","id":"u4"}]}]}`
+		scores := &scoreErrorsDataSource{contextualEntitiesDataSource: &contextualEntitiesDataSource{entity: func(_, _ *astjson.Value) string {
+			return `{"__typename":"User","score":null}`
+		}}, indices: []int{1, 2}}
+		scoresFetch := contextualUsersFetch(1, scores)
+		scoresFetch.Info.FetchReasons = requiresScore
+		users := newContextualUsersDataSource("contextualArgument_0")
+		profiles := contextualUsersFetch(2, users, queueContextualCapture)
+		profiles.DependsOnFetchIDs = []int{1}
+		loader := newContextualLoader(data)
+		loader.validateRequiredExternalFields = true
+
+		runContextualLoader(t, loader, NewContext(t.Context()), Sequence(flaggedUsersFetch(scoresFetch), flaggedUsersFetch(profiles)))
+
+		assert.ElementsMatch(t, []string{
+			contextualUsersRequest(`,"contextualArgument_0":true`, "u0", "u4"),
+			contextualUsersRequest(`,"contextualArgument_0":false`, "u3"),
+		}, users.recordedRequests())
+	})
+
+	t.Run("a group taints only its own entities", func(t *testing.T) {
+		// The response to the false group fails the score of its first entity, u2.
+		data := `{"moderationQueues":[` +
+			`{"__context_0":true,"flaggedUsers":[{"__typename":"User","id":"u0"},{"__typename":"User","id":"u1"}]},` +
+			`{"__context_0":false,"flaggedUsers":[{"__typename":"User","id":"u2"},{"__typename":"User","id":"u3"}]}]}`
+		users := &scoreErrorsDataSource{contextualEntitiesDataSource: &contextualEntitiesDataSource{entity: func(representation, _ *astjson.Value) string {
+			return `{"__typename":"User","score":null,"profile":"` + string(representation.GetStringBytes("id")) + `"}`
+		}}, when: `"contextualArgument_0":false`, indices: []int{0}}
+		profiles := contextualUsersFetch(1, users, queueContextualCapture)
+		profiles.Info.FetchReasons = requiresScore
+		dependent := newContextualUsersDataSource()
+		dependentFetch := contextualUsersFetch(2, dependent)
+		dependentFetch.DependsOnFetchIDs = []int{1}
+		loader := newContextualLoader(data)
+		loader.validateRequiredExternalFields = true
+
+		runContextualLoader(t, loader, NewContext(t.Context()), Sequence(flaggedUsersFetch(profiles), flaggedUsersFetch(dependentFetch)))
+
+		assert.Len(t, users.recordedRequests(), 2)
+		assert.Equal(t, []string{contextualUsersRequest(``, "u0", "u1", "u3")}, dependent.recordedRequests())
+	})
 }
 
 // blockingContextualDataSource reports every request on arrived and answers it only with the error of its canceled context.
@@ -945,6 +1052,7 @@ func TestContextualArgumentResponseCache(t *testing.T) {
 			`{"__context_0":true,"flaggedUsers":[{"__typename":"User","id":"u1","profile":"u1:true"}]},`+
 			`{"__context_0":false,"flaggedUsers":[{"__typename":"User","id":"u1","profile":"u1:false"}]}]}}`, out)
 	})
+
 }
 
 func TestContextualArgumentSubgraphSingleflight(t *testing.T) {
@@ -987,6 +1095,7 @@ func TestContextualArgumentSubgraphSingleflight(t *testing.T) {
 		assert.Contains(t, outputs[0], `"profile":"u1:true"`)
 		assert.Contains(t, outputs[1], `"profile":"u1:false"`)
 	})
+
 }
 
 func TestContextualArgumentVariableWithoutGroupValues(t *testing.T) {
