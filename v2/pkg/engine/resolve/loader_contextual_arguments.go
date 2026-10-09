@@ -117,6 +117,11 @@ func (l *Loader) prepareContextualArgumentGroups(fetchItem *FetchItem, fetch *Ba
 	var traces []*DataSourceLoadTrace
 	requests := make([]*preparedFetch, 0, len(groups))
 	validated := false
+	largest := 0
+	for i := range groups {
+		largest = max(largest, groups[i].items)
+	}
+	groupTools := res.tools.contextualArgumentGroupTools(largest)
 	for i := range groups {
 		groupRes := &result{}
 		groupRes.init(fetch.PostProcessing, fetch.Info)
@@ -127,9 +132,9 @@ func (l *Loader) prepareContextualArgumentGroups(fetchItem *FetchItem, fetch *Ba
 			traces = append(traces, group.trace)
 		}
 
-		res.tools.clearDedupState()
+		groupTools.clearDedupState()
 		values := ContextualArgumentValues{Names: names, Values: groups[i].values}
-		input, err := l.renderBatchEntityInput(fetch, items, groups[i].spans, &values, res.tools, groupRes, group, group.trace)
+		input, err := l.renderBatchEntityInput(fetch, items, groups[i].spans, &values, &groupTools, groupRes, group, group.trace)
 		if err != nil {
 			return err
 		}
@@ -169,6 +174,16 @@ func (l *Loader) prepareContextualArgumentGroups(fetchItem *FetchItem, fetch *Ba
 	}
 	prepared.groups = &preparedGroups{fetches: requests}
 	return nil
+}
+
+// contextualArgumentGroupTools returns tools that dedupe one group of up to items entities at a time. Clearing a map costs its
+// capacity, so the groups use a map of their own, made again when it is too small or more than four times too large.
+func (b *batchEntityTools) contextualArgumentGroupTools(items int) batchEntityTools {
+	if b.groupHashToIndex == nil || b.groupHashToIndexSize < items || b.groupHashToIndexSize > 4*items {
+		b.groupHashToIndex = make(map[uint64]batchItemRef, items)
+		b.groupHashToIndexSize = items
+	}
+	return batchEntityTools{keyGen: b.keyGen, batchHashToIndex: b.groupHashToIndex, a: b.a}
 }
 
 // traceSkippedContextualArgumentFetch records the trace of a contextual fetch that sends no request for its items.
@@ -510,6 +525,8 @@ type contextualArgumentGroup struct {
 	// values holds the rendered value of each capture, slices of tuple.
 	values [][]byte
 	spans  []batchItemSpan
+	// items counts the items of spans.
+	items int
 }
 
 // groupContextualArgumentRuns groups the runs by their rendered values on the arena of tools: the hash narrows, the bytes decide.
@@ -561,6 +578,7 @@ func groupContextualArgumentRuns(tools *batchEntityTools, runs []contextualArgum
 			spans = arena.SliceAppend(tools.a, spans, span)
 		}
 		groups[group].spans = spans
+		groups[group].items += span.end - span.start
 		previous = group
 	}
 	tools.clearDedupState()

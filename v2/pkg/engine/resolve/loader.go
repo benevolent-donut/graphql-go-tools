@@ -1921,6 +1921,9 @@ type batchEntityTools struct {
 	keyGen           *xxhash.Digest
 	batchHashToIndex map[uint64]batchItemRef
 	a                arena.Arena
+	// groupHashToIndex dedupes the groups of a contextual argument fetch one at a time; it was made for groupHashToIndexSize entries.
+	groupHashToIndex     map[uint64]batchItemRef
+	groupHashToIndexSize int
 }
 
 func (b *batchEntityTools) reset() {
