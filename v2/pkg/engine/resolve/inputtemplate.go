@@ -64,10 +64,16 @@ type InputTemplateWriter interface {
 	Bytes() []byte
 }
 
+// ContextualArgumentValues holds the rendered values of one group, aligned with the fetch's ContextualArguments.
+type ContextualArgumentValues struct {
+	Names  []string
+	Values [][]byte
+}
+
 func (i *InputTemplate) Render(ctx *Context, data *astjson.Value, preparedInput InputTemplateWriter) error {
 	var undefinedVariables []string
 
-	if err := i.renderSegments(ctx, data, i.Segments, preparedInput, &undefinedVariables); err != nil {
+	if err := i.renderSegments(ctx, data, nil, i.Segments, preparedInput, &undefinedVariables); err != nil {
 		return err
 	}
 
@@ -75,11 +81,16 @@ func (i *InputTemplate) Render(ctx *Context, data *astjson.Value, preparedInput 
 }
 
 func (i *InputTemplate) RenderAndCollectUndefinedVariables(ctx *Context, data *astjson.Value, preparedInput InputTemplateWriter, undefinedVariables *[]string) (err error) {
-	err = i.renderSegments(ctx, data, i.Segments, preparedInput, undefinedVariables)
+	err = i.renderSegments(ctx, data, nil, i.Segments, preparedInput, undefinedVariables)
 	return
 }
 
-func (i *InputTemplate) renderSegments(ctx *Context, data *astjson.Value, segments []TemplateSegment, preparedInput InputTemplateWriter, undefinedVariables *[]string) (err error) {
+// RenderWithContextualArguments is RenderAndCollectUndefinedVariables with the contextual argument values of one group of items.
+func (i *InputTemplate) RenderWithContextualArguments(ctx *Context, data *astjson.Value, values *ContextualArgumentValues, preparedInput InputTemplateWriter, undefinedVariables *[]string) error {
+	return i.renderSegments(ctx, data, values, i.Segments, preparedInput, undefinedVariables)
+}
+
+func (i *InputTemplate) renderSegments(ctx *Context, data *astjson.Value, values *ContextualArgumentValues, segments []TemplateSegment, preparedInput InputTemplateWriter, undefinedVariables *[]string) (err error) {
 	for _, segment := range segments {
 		switch segment.SegmentType {
 		case StaticSegmentType:
@@ -98,6 +109,8 @@ func (i *InputTemplate) renderSegments(ctx *Context, data *astjson.Value, segmen
 				err = i.renderResolvableObjectVariable(ctx.Context(), data, segment, preparedInput)
 			case HeaderVariableKind:
 				err = i.renderHeaderVariable(ctx, segment.VariableSourcePath, preparedInput)
+			case ContextualArgumentVariableKind:
+				err = renderContextualArgumentVariable(values, segment.VariableSourcePath, preparedInput)
 			default:
 				err = fmt.Errorf("InputTemplate.Render: cannot resolve variable of kind: %d", segment.VariableKind)
 			}
@@ -139,6 +152,19 @@ func (i *InputTemplate) renderContextVariable(ctx *Context, segment TemplateSegm
 		return true, nil
 	}
 	return false, segment.Renderer.RenderVariable(ctx.Context(), value, preparedInput)
+}
+
+// renderContextualArgumentVariable fails without a value, so a contextual argument is never sent as null by accident.
+func renderContextualArgumentVariable(values *ContextualArgumentValues, path []string, preparedInput InputTemplateWriter) error {
+	if values != nil && len(path) == 1 {
+		for i := range values.Names {
+			if values.Names[i] == path[0] {
+				_, err := preparedInput.Write(values.Values[i])
+				return err
+			}
+		}
+	}
+	return fmt.Errorf("InputTemplate.Render: no value for the contextual argument variable %v", path)
 }
 
 func (i *InputTemplate) renderHeaderVariable(ctx *Context, path []string, preparedInput InputTemplateWriter) error {

@@ -139,6 +139,7 @@ func (n *FetchTreeNode) Trace() *FetchTreeTraceNode {
 				SourceID:   f.Info.DataSourceID,
 				SourceName: f.Info.DataSourceName,
 				Trace:      f.Trace,
+				Traces:     f.Traces,
 				Path:       n.Item.ResponsePath,
 			}
 		case *MultiEntityFetch:

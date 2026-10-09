@@ -175,6 +175,8 @@ type BatchEntityFetch struct {
 	Trace                *DataSourceLoadTrace
 	Info                 *FetchInfo
 	ContextualArguments  []ContextualArgumentCapture
+	// Traces holds one trace per value group when the fetch sends several requests; Trace holds the first.
+	Traces []*DataSourceLoadTrace
 }
 
 func (b *BatchEntityFetch) Dependencies() *FetchDependencies {

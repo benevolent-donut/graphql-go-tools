@@ -337,6 +337,9 @@ type Loader struct {
 
 	validateRequiredExternalFields bool
 
+	// maxContextualArgumentGroups is ResolverOptions.MaxContextualArgumentGroups; 0 applies the default.
+	maxContextualArgumentGroups int
+
 	taintedObjs taintedObjects
 
 	erroredFetchIDs map[int]struct{}
@@ -448,6 +451,9 @@ func (l *Loader) preparePhase(item *FetchItem) (*preparedFetch, error) {
 	if l.shouldSkipErroredDependencyLocked(item) {
 		return nil, nil
 	}
+	if captures := fetchContextualArguments(item.Fetch); len(captures) != 0 {
+		return l.prepareContextualArgumentFetch(item, captures)
+	}
 
 	items := l.selectItemsForPath(item.FetchPath)
 	res := &result{}
@@ -461,7 +467,7 @@ func (l *Loader) preparePhase(item *FetchItem) (*preparedFetch, error) {
 		err := l.prepareSingleFetch(item, fetch, items, res, prepared)
 		return prepared, err
 	case *EntityFetch:
-		err := l.prepareEntityFetch(item, fetch, items, res, prepared)
+		err := l.prepareEntityFetch(item, fetch, items, nil, res, prepared)
 		return prepared, err
 	case *BatchEntityFetch:
 		prepared.batchFetch = true
@@ -478,6 +484,9 @@ func (l *Loader) preparePhase(item *FetchItem) (*preparedFetch, error) {
 func (l *Loader) loadPhase(ctx context.Context, prepared *preparedFetch) error {
 	if prepared.skipLoad {
 		return nil
+	}
+	if prepared.groups != nil {
+		return l.loadContextualArgumentGroups(ctx, prepared)
 	}
 	// A merged fetch resolves its cache per entry, and that reshapes the request,
 	// so it happens here rather than on the whole-fetch path below.
@@ -525,6 +534,9 @@ func (l *Loader) mergePhase(prepared *preparedFetch) error {
 
 	if prepared.multiEntries != nil {
 		return l.mergeMultiEntityResult(prepared)
+	}
+	if prepared.groups != nil {
+		return l.mergeContextualArgumentGroups(prepared)
 	}
 
 	if err := l.responseCacheCollect(prepared); err != nil {
@@ -595,6 +607,9 @@ type preparedFetch struct {
 	// material the load phase needs to rebuild it once the response-cache lookup
 	// has switched the warm entries off.
 	multiAssembly *multiAssembly
+
+	// groups holds one request per group of contextual argument values when a fetch sends several.
+	groups *preparedGroups
 }
 
 func (l *Loader) shouldSkipErroredDependencyLocked(item *FetchItem) bool {
@@ -691,8 +706,7 @@ func isItemAllowedByTypename(obj *astjson.Value, typeNames []string) bool {
 		return true
 	}
 
-	__typeNameStr := string(__typeName)
-	return slices.Contains(typeNames, __typeNameStr)
+	return slices.Contains(typeNames, unsafebytes.BytesToString(__typeName))
 }
 
 func selectItems(a arena.Arena, items []*astjson.Value, element FetchItemPathElement) []*astjson.Value {
@@ -1790,7 +1804,7 @@ func (l *Loader) prepareSingleFetch(fetchItem *FetchItem, fetch *SingleFetch, it
 	return nil
 }
 
-func (l *Loader) prepareEntityFetch(fetchItem *FetchItem, fetch *EntityFetch, items []*astjson.Value, res *result, prepared *preparedFetch) error {
+func (l *Loader) prepareEntityFetch(fetchItem *FetchItem, fetch *EntityFetch, items []*astjson.Value, values *ContextualArgumentValues, res *result, prepared *preparedFetch) error {
 	res.init(fetch.PostProcessing, fetch.Info)
 	input := l.itemsData(items)
 	if l.ctx.TracingOptions.Enable {
@@ -1805,7 +1819,7 @@ func (l *Loader) prepareEntityFetch(fetchItem *FetchItem, fetch *EntityFetch, it
 
 	var undefinedVariables []string
 
-	err := fetch.Input.Header.RenderAndCollectUndefinedVariables(l.ctx, nil, preparedInput, &undefinedVariables)
+	err := fetch.Input.Header.RenderWithContextualArguments(l.ctx, nil, values, preparedInput, &undefinedVariables)
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -1850,7 +1864,7 @@ func (l *Loader) prepareEntityFetch(fetchItem *FetchItem, fetch *EntityFetch, it
 
 	responseCacheFooterStart := preparedInput.Len()
 
-	err = fetch.Input.Footer.RenderAndCollectUndefinedVariables(l.ctx, nil, preparedInput, &undefinedVariables)
+	err = fetch.Input.Footer.RenderWithContextualArguments(l.ctx, nil, values, preparedInput, &undefinedVariables)
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -1945,7 +1959,13 @@ var (
 
 func (l *Loader) prepareBatchEntityFetch(fetchItem *FetchItem, fetch *BatchEntityFetch, items []*astjson.Value, res *result, prepared *preparedFetch) error {
 	res.init(fetch.PostProcessing, fetch.Info)
+	res.tools = batchEntityToolPool.Get(len(items))
+	return l.prepareBatchEntityFetchGroup(fetchItem, fetch, items, nil, nil, res, prepared)
+}
 
+// prepareBatchEntityFetchGroup prepares the request for the items of spans, every item when spans is nil,
+// with the contextual argument values of their group, or nil values for a fetch without contextual arguments.
+func (l *Loader) prepareBatchEntityFetchGroup(fetchItem *FetchItem, fetch *BatchEntityFetch, items []*astjson.Value, spans []batchItemSpan, values *ContextualArgumentValues, res *result, prepared *preparedFetch) error {
 	if l.ctx.TracingOptions.Enable {
 		fetch.Trace = &DataSourceLoadTrace{}
 		if !l.ctx.TracingOptions.ExcludeRawInputData && len(items) != 0 {
@@ -1956,122 +1976,9 @@ func (l *Loader) prepareBatchEntityFetch(fetchItem *FetchItem, fetch *BatchEntit
 		}
 	}
 
-	res.tools = batchEntityToolPool.Get(len(items))
-	preparedInput := arena.NewArenaBuffer(res.tools.a)
-	itemInput := arena.NewArenaBuffer(res.tools.a)
-	batchStats := arena.AllocateSlice[[]*astjson.Value](res.tools.a, 0, len(items))
-	defer func() {
-		// we need to clear the batchStats slice to avoid memory corruption
-		// once the outer func returns, we must not keep pointers to items on the arena
-		for i := range batchStats {
-			batchStats[i] = nil
-		}
-		batchStats = nil
-	}()
-
-	// I tried using arena here, but it only worsened the situation
-	var undefinedVariables []string
-
-	err := fetch.Input.Header.RenderAndCollectUndefinedVariables(l.ctx, nil, preparedInput, &undefinedVariables)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	responseCacheHeaderEnd := preparedInput.Len()
-	var responseCacheItems []caching.Digest
-
-	batchItemIndex := 0
-	addSeparator := false
-
-WithNextItem:
-	for i, item := range items {
-		for j := range fetch.Input.Items {
-			itemInput.Reset()
-			err = fetch.Input.Items[j].Render(l.ctx, item, itemInput)
-			if err != nil {
-				if fetch.Input.SkipErrItems {
-					continue
-				}
-				if l.ctx.TracingOptions.Enable {
-					fetch.Trace.LoadSkipped = true
-				}
-				return errors.WithStack(err)
-			}
-			if fetch.Input.SkipNullItems && itemInput.Len() == 4 && bytes.Equal(itemInput.Bytes(), null) {
-				continue
-			}
-			if fetch.Input.SkipEmptyObjectItems && itemInput.Len() == 2 && bytes.Equal(itemInput.Bytes(), emptyObject) {
-				continue
-			}
-
-			res.tools.keyGen.Reset()
-			_, _ = res.tools.keyGen.Write(itemInput.Bytes())
-			itemHash := res.tools.keyGen.Sum64()
-			// The hash narrows, the bytes decide: a collision is a new representation.
-			if ref, ok := res.tools.batchHashToIndex[itemHash]; ok &&
-				bytes.Equal(preparedInput.Bytes()[ref.start:ref.end], itemInput.Bytes()) {
-				batchStats[ref.index] = arena.SliceAppend(res.tools.a, batchStats[ref.index], items[i])
-				continue WithNextItem
-			}
-			if addSeparator {
-				err = fetch.Input.Separator.Render(l.ctx, nil, preparedInput)
-				if err != nil {
-					return errors.WithStack(err)
-				}
-			}
-			// Digested before WriteTo drains the buffer.
-			if l.responseCacheEnabledFor(res.ds.Name) {
-				responseCacheItems = append(responseCacheItems, caching.DigestBytes(itemInput.Bytes()))
-			}
-			start := preparedInput.Len()
-			_, _ = itemInput.WriteTo(preparedInput)
-			// new unique representation
-			res.tools.batchHashToIndex[itemHash] = batchItemRef{index: batchItemIndex, start: start, end: preparedInput.Len()}
-			// A new targets bucket for the unique index must be allocated on the arena:
-			// a heap-allocated bucket would only be referenced from arena memory,
-			// so the GC could collect its backing array while it is still in use.
-			bucket := arena.AllocateSlice[*astjson.Value](res.tools.a, 1, 1)
-			bucket[0] = items[i]
-			batchStats = arena.SliceAppend(res.tools.a, batchStats, bucket)
-			batchItemIndex++
-			addSeparator = true
-		}
-	}
-
-	if len(batchStats) == 0 {
-		// all items were skipped - discard fetch
-		res.fetchSkipped = true
-		if l.ctx.TracingOptions.Enable {
-			fetch.Trace.LoadSkipped = true
-		} else {
-			prepared.skipLoad = true
-			return nil
-		}
-	}
-
-	responseCacheFooterStart := preparedInput.Len()
-
-	err = fetch.Input.Footer.RenderAndCollectUndefinedVariables(l.ctx, nil, preparedInput, &undefinedVariables)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	if len(responseCacheItems) > 0 {
-		rendered := preparedInput.Bytes()
-		selection := caching.DigestParts(rendered[:responseCacheHeaderEnd], rendered[responseCacheFooterStart:])
-		l.responseCacheSetKeys(prepared, selection, responseCacheItems)
-	}
-
-	err = SetInputUndefinedVariables(preparedInput, undefinedVariables)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	fetchInput := preparedInput.Bytes()
-	// it's important to copy the *astjson.Value's off the arena to avoid memory corruption
-	res.batchStats = make([][]*astjson.Value, len(batchStats))
-	for i := range batchStats {
-		res.batchStats[i] = make([]*astjson.Value, len(batchStats[i]))
-		copy(res.batchStats[i], batchStats[i])
+	fetchInput, err := l.renderBatchEntityInput(fetch, items, spans, values, res.tools, res, prepared, fetch.Trace)
+	if err != nil || prepared.skipLoad {
+		return err
 	}
 
 	if l.ctx.TracingOptions.Enable && res.fetchSkipped {
@@ -2093,6 +2000,145 @@ WithNextItem:
 	prepared.input = fetchInput
 	prepared.trace = fetch.Trace
 	return nil
+}
+
+// batchItemSpan is the range [start, end) of the items of a batch entity fetch.
+type batchItemSpan struct {
+	start, end int
+}
+
+// renderBatchEntityInput renders the request for the items of spans, every item when spans is nil, on the arena of tools.
+// It sets res.batchStats and the response cache keys of prepared, and skips the load when no item renders a representation.
+func (l *Loader) renderBatchEntityInput(fetch *BatchEntityFetch, items []*astjson.Value, spans []batchItemSpan, values *ContextualArgumentValues, tools *batchEntityTools, res *result, prepared *preparedFetch, trace *DataSourceLoadTrace) ([]byte, error) {
+	var allItems [1]batchItemSpan
+	if spans == nil {
+		allItems[0].end = len(items)
+		spans = allItems[:]
+	}
+	itemCount := 0
+	for _, span := range spans {
+		itemCount += span.end - span.start
+	}
+
+	preparedInput := arena.NewArenaBuffer(tools.a)
+	itemInput := arena.NewArenaBuffer(tools.a)
+	batchStats := arena.AllocateSlice[[]*astjson.Value](tools.a, 0, itemCount)
+	defer func() {
+		// we need to clear the batchStats slice to avoid memory corruption
+		// once the outer func returns, we must not keep pointers to items on the arena
+		for i := range batchStats {
+			batchStats[i] = nil
+		}
+		batchStats = nil
+	}()
+
+	// I tried using arena here, but it only worsened the situation
+	var undefinedVariables []string
+
+	err := fetch.Input.Header.RenderWithContextualArguments(l.ctx, nil, values, preparedInput, &undefinedVariables)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	responseCacheHeaderEnd := preparedInput.Len()
+	var responseCacheItems []caching.Digest
+
+	batchItemIndex := 0
+	addSeparator := false
+
+	for _, span := range spans {
+	WithNextItem:
+		for i := span.start; i < span.end; i++ {
+			item := items[i]
+			for j := range fetch.Input.Items {
+				itemInput.Reset()
+				err = fetch.Input.Items[j].Render(l.ctx, item, itemInput)
+				if err != nil {
+					if fetch.Input.SkipErrItems {
+						continue
+					}
+					if l.ctx.TracingOptions.Enable {
+						trace.LoadSkipped = true
+					}
+					return nil, errors.WithStack(err)
+				}
+				if fetch.Input.SkipNullItems && itemInput.Len() == 4 && bytes.Equal(itemInput.Bytes(), null) {
+					continue
+				}
+				if fetch.Input.SkipEmptyObjectItems && itemInput.Len() == 2 && bytes.Equal(itemInput.Bytes(), emptyObject) {
+					continue
+				}
+
+				tools.keyGen.Reset()
+				_, _ = tools.keyGen.Write(itemInput.Bytes())
+				itemHash := tools.keyGen.Sum64()
+				// The hash narrows, the bytes decide: a collision is a new representation.
+				if ref, ok := tools.batchHashToIndex[itemHash]; ok &&
+					bytes.Equal(preparedInput.Bytes()[ref.start:ref.end], itemInput.Bytes()) {
+					batchStats[ref.index] = arena.SliceAppend(tools.a, batchStats[ref.index], items[i])
+					continue WithNextItem
+				}
+				if addSeparator {
+					err = fetch.Input.Separator.Render(l.ctx, nil, preparedInput)
+					if err != nil {
+						return nil, errors.WithStack(err)
+					}
+				}
+				// Digested before WriteTo drains the buffer.
+				if l.responseCacheEnabledFor(res.ds.Name) {
+					responseCacheItems = append(responseCacheItems, caching.DigestBytes(itemInput.Bytes()))
+				}
+				start := preparedInput.Len()
+				_, _ = itemInput.WriteTo(preparedInput)
+				// new unique representation
+				tools.batchHashToIndex[itemHash] = batchItemRef{index: batchItemIndex, start: start, end: preparedInput.Len()}
+				// A new targets bucket for the unique index must be allocated on the arena:
+				// a heap-allocated bucket would only be referenced from arena memory,
+				// so the GC could collect its backing array while it is still in use.
+				bucket := arena.AllocateSlice[*astjson.Value](tools.a, 1, 1)
+				bucket[0] = items[i]
+				batchStats = arena.SliceAppend(tools.a, batchStats, bucket)
+				batchItemIndex++
+				addSeparator = true
+			}
+		}
+	}
+
+	if len(batchStats) == 0 {
+		// all items were skipped - discard fetch
+		res.fetchSkipped = true
+		if l.ctx.TracingOptions.Enable {
+			trace.LoadSkipped = true
+		} else {
+			prepared.skipLoad = true
+			return nil, nil
+		}
+	}
+
+	responseCacheFooterStart := preparedInput.Len()
+
+	err = fetch.Input.Footer.RenderWithContextualArguments(l.ctx, nil, values, preparedInput, &undefinedVariables)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	if len(responseCacheItems) > 0 {
+		rendered := preparedInput.Bytes()
+		selection := caching.DigestParts(rendered[:responseCacheHeaderEnd], rendered[responseCacheFooterStart:])
+		l.responseCacheSetKeys(prepared, selection, responseCacheItems)
+	}
+
+	err = SetInputUndefinedVariables(preparedInput, undefinedVariables)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	// it's important to copy the *astjson.Value's off the arena to avoid memory corruption
+	res.batchStats = make([][]*astjson.Value, len(batchStats))
+	for i := range batchStats {
+		res.batchStats[i] = make([]*astjson.Value, len(batchStats[i]))
+		copy(res.batchStats[i], batchStats[i])
+	}
+	return preparedInput.Bytes(), nil
 }
 
 func redactHeaders(rawJSON json.RawMessage) (json.RawMessage, error) {

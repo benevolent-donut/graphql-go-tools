@@ -220,6 +220,10 @@ type ResolverOptions struct {
 	// and will override any values set for those options
 	// using runtime.GOMAXPROCS(0) allows the deduplication to scale with the CPU resources available to the process
 	SetDeduplicationShardCountToGOMAXPROCS bool
+
+	// MaxContextualArgumentGroups limits the requests one entity fetch sends for distinct contextual argument values.
+	// 0 applies the default of 100.
+	MaxContextualArgumentGroups int
 }
 
 // New returns a new Resolver. ctx.Done() is used to cancel all active subscriptions and streams.
@@ -337,6 +341,7 @@ func NewLoader(options ResolverOptions, allowedExtensionFields map[string]struct
 		apolloRouterCompatibilitySubrequestHTTPError:   options.ApolloRouterCompatibilitySubrequestHTTPError,
 		propagateFetchReasons:                          options.PropagateFetchReasons,
 		validateRequiredExternalFields:                 options.ValidateRequiredExternalFields,
+		maxContextualArgumentGroups:                    options.MaxContextualArgumentGroups,
 		singleFlight:                                   sf,
 		jsonArena:                                      a,
 	}
