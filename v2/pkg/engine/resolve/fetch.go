@@ -174,6 +174,7 @@ type BatchEntityFetch struct {
 	DataSourceIdentifier []byte
 	Trace                *DataSourceLoadTrace
 	Info                 *FetchInfo
+	ContextualArguments  []ContextualArgumentCapture
 }
 
 func (b *BatchEntityFetch) Dependencies() *FetchDependencies {
@@ -214,6 +215,7 @@ type EntityFetch struct {
 	DataSourceIdentifier []byte
 	Trace                *DataSourceLoadTrace
 	Info                 *FetchInfo
+	ContextualArguments  []ContextualArgumentCapture
 }
 
 func (e *EntityFetch) Dependencies() *FetchDependencies {
@@ -380,7 +382,7 @@ type FetchDependency struct {
 
 // FetchDependencyOrigin defines a GraphCoordinate on a FetchID that another Coordinate depends on
 // In addition, it contains information on the Subgraph providing the field,
-// and if the Coordinate is a @key or a @requires field dependency
+// and if the Coordinate is a @key, a @requires or a @fromContext field dependency
 type FetchDependencyOrigin struct {
 	// FetchID is the fetch id providing the Coordinate
 	FetchID int `json:"fetchId"`
@@ -392,6 +394,8 @@ type FetchDependencyOrigin struct {
 	IsKey bool `json:"isKey"`
 	// IsRequires is true if the Coordinate is a @requires dependency
 	IsRequires bool `json:"isRequires"`
+	// IsContext is true if the Coordinate is a @fromContext dependency
+	IsContext bool `json:"isContext,omitempty"`
 }
 
 // FetchReason explains who requested a specific (TypeName, FieldName) coordinate.
@@ -403,6 +407,7 @@ type FetchReason struct {
 	ByUser      bool     `json:"by_user,omitempty"`
 	IsKey       bool     `json:"is_key,omitempty"`
 	IsRequires  bool     `json:"is_requires,omitempty"`
+	IsContext   bool     `json:"is_context,omitempty"`
 	Nullable    bool     `json:"-"`
 }
 

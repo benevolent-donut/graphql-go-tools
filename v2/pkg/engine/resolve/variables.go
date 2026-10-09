@@ -12,6 +12,7 @@ const (
 	HeaderVariableKind
 	ResolvableObjectVariableKind
 	ListVariableKind
+	ContextualArgumentVariableKind
 )
 
 const (
@@ -189,4 +190,33 @@ func (h *ResolvableObjectVariable) Equals(another Variable) bool {
 	anotherVariable := another.(*ResolvableObjectVariable)
 
 	return h.Renderer.Node.Equals(anotherVariable.Renderer.Node)
+}
+
+// ContextualArgumentVariable renders a contextual argument value captured by the loader for one group of items.
+type ContextualArgumentVariable struct {
+	Capture ContextualArgumentCapture
+}
+
+func (c *ContextualArgumentVariable) TemplateSegment() TemplateSegment {
+	return TemplateSegment{
+		SegmentType:        VariableSegmentType,
+		VariableKind:       ContextualArgumentVariableKind,
+		VariableSourcePath: []string{c.Capture.VariableName},
+	}
+}
+
+func (*ContextualArgumentVariable) GetVariableKind() VariableKind {
+	return ContextualArgumentVariableKind
+}
+
+func (c *ContextualArgumentVariable) Equals(another Variable) bool {
+	if another == nil {
+		return false
+	}
+	if another.GetVariableKind() != c.GetVariableKind() {
+		return false
+	}
+	anotherVariable := another.(*ContextualArgumentVariable)
+
+	return c.Capture.Equals(&anotherVariable.Capture)
 }

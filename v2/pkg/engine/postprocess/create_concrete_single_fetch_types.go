@@ -96,8 +96,9 @@ func (d *createConcreteSingleFetchTypes) createEntityBatchFetch(fetch *resolve.S
 				SetTemplateOutputToNullOnVariableNull: fetch.InputTemplate.SetTemplateOutputToNullOnVariableNull,
 			},
 		},
-		DataSource:     fetch.DataSource,
-		PostProcessing: fetch.PostProcessing,
+		DataSource:          fetch.DataSource,
+		PostProcessing:      fetch.PostProcessing,
+		ContextualArguments: contextualArgumentCaptures(fetch.Variables),
 	}
 }
 
@@ -129,7 +130,27 @@ func (d *createConcreteSingleFetchTypes) createEntityFetch(fetch *resolve.Single
 				SetTemplateOutputToNullOnVariableNull: fetch.InputTemplate.SetTemplateOutputToNullOnVariableNull,
 			},
 		},
-		DataSource:     fetch.DataSource,
-		PostProcessing: fetch.PostProcessing,
+		DataSource:          fetch.DataSource,
+		PostProcessing:      fetch.PostProcessing,
+		ContextualArguments: contextualArgumentCaptures(fetch.Variables),
 	}
+}
+
+func hasContextualArgumentVariable(variables resolve.Variables) bool {
+	for _, variable := range variables {
+		if _, ok := variable.(*resolve.ContextualArgumentVariable); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func contextualArgumentCaptures(variables resolve.Variables) []resolve.ContextualArgumentCapture {
+	var captures []resolve.ContextualArgumentCapture
+	for _, variable := range variables {
+		if contextual, ok := variable.(*resolve.ContextualArgumentVariable); ok {
+			captures = append(captures, contextual.Capture)
+		}
+	}
+	return captures
 }

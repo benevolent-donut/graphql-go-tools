@@ -87,6 +87,7 @@ type fieldsIndex struct {
 
 func (d *DataSourceMetadata) Init() error {
 	d.InitNodesIndex()
+	d.FederationMetaData.initContextualArguments()
 	return d.InitKeys()
 }
 
@@ -363,11 +364,12 @@ func (d *dataSourceConfiguration[T]) GetCostConfig() *DataSourceCostConfig {
 }
 
 type DataSourcePlannerConfiguration struct {
-	RequiredFields FederationFieldConfigurations
-	ParentPath     string
-	PathType       PlannerPathType
-	IsNested       bool
-	Options        plannerConfigurationOptions
+	RequiredFields      FederationFieldConfigurations
+	ParentPath          string
+	PathType            PlannerPathType
+	IsNested            bool
+	Options             plannerConfigurationOptions
+	ContextualArguments []ContextualArgumentPlan
 }
 
 type PlannerPathType int

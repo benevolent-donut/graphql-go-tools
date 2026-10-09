@@ -408,4 +408,68 @@ func TestDeduplicateSingleFetches_ProcessFetchTree(t *testing.T) {
 
 		assert.Equal(t, output, input)
 	})
+
+	contextualFetch := func(fetchID int, setterTypeName string) *resolve.FetchTreeNode {
+		return &resolve.FetchTreeNode{
+			Kind: resolve.FetchTreeNodeKindSingle,
+			Item: &resolve.FetchItem{
+				FetchPath: []resolve.FetchItemPathElement{{Kind: resolve.FetchItemPathElementKindArray, Path: []string{"queues"}}},
+				Fetch: &resolve.SingleFetch{
+					FetchDependencies: resolve.FetchDependencies{FetchID: fetchID},
+					FetchConfiguration: resolve.FetchConfiguration{
+						Input: "a",
+						Variables: resolve.NewVariables(&resolve.ContextualArgumentVariable{
+							Capture: resolve.ContextualArgumentCapture{
+								VariableName: "contextualArgument_0",
+								Levels: []resolve.ContextualArgumentLevel{
+									{Depth: 1, Setters: []resolve.ContextualArgumentSetter{{TypeName: setterTypeName, Path: []string{"__context_0"}}}},
+								},
+							},
+						}),
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("same path, same input, same contextual argument capture", func(t *testing.T) {
+		input := &resolve.FetchTreeNode{
+			ChildNodes: []*resolve.FetchTreeNode{
+				contextualFetch(1, "ModerationQueue"),
+				contextualFetch(2, "ModerationQueue"),
+			},
+		}
+
+		output := &resolve.FetchTreeNode{
+			ChildNodes: []*resolve.FetchTreeNode{
+				contextualFetch(1, "ModerationQueue"),
+			},
+		}
+
+		dedup := &deduplicateSingleFetches{}
+		dedup.ProcessFetchTree(input)
+
+		assert.Equal(t, output, input)
+	})
+
+	t.Run("same path, same input, different contextual argument captures", func(t *testing.T) {
+		input := &resolve.FetchTreeNode{
+			ChildNodes: []*resolve.FetchTreeNode{
+				contextualFetch(1, "ModerationQueue"),
+				contextualFetch(2, "AppealQueue"),
+			},
+		}
+
+		output := &resolve.FetchTreeNode{
+			ChildNodes: []*resolve.FetchTreeNode{
+				contextualFetch(1, "ModerationQueue"),
+				contextualFetch(2, "AppealQueue"),
+			},
+		}
+
+		dedup := &deduplicateSingleFetches{}
+		dedup.ProcessFetchTree(input)
+
+		assert.Equal(t, output, input)
+	})
 }

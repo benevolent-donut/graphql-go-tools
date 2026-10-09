@@ -188,6 +188,8 @@ type SourceType string
 const (
 	ObjectFieldSource   SourceType = "object_field"
 	FieldArgumentSource SourceType = "field_argument"
+	// ContextualArgumentSource marks a @fromContext argument; the engine binds it only from captured context values.
+	ContextualArgumentSource SourceType = "contextual_argument"
 )
 
 // ArgumentRenderConfig is used to determine how an argument should be rendered

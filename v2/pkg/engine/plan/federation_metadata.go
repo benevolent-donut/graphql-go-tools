@@ -14,9 +14,34 @@ type FederationMetaData struct {
 	Provides         FederationFieldConfigurations
 	EntityInterfaces []EntityInterfaceConfiguration
 	InterfaceObjects []EntityInterfaceConfiguration
+	// ContextualArguments lists the @fromContext arguments of fields resolved by this data source.
+	ContextualArguments ContextualArgumentConfigurations
 
-	entityTypeNames map[string]struct{}
+	entityTypeNames            map[string]struct{}
+	contextualArgumentsByField map[contextualArgumentFieldKey][]ContextualArgumentConfiguration
 }
+
+type contextualArgumentFieldKey struct {
+	typeName  string
+	fieldName string
+}
+
+type ContextualArgumentConfiguration struct {
+	TypeName     string
+	FieldName    string
+	ArgumentName string
+	ContextName  string
+	Setters      []ContextSetterConfiguration
+}
+
+type ContextSetterConfiguration struct {
+	// TypeName is a concrete object type that sets the context.
+	TypeName string
+	// SelectionSet resolves the value on TypeName; empty when TypeName sets the context to null.
+	SelectionSet string
+}
+
+type ContextualArgumentConfigurations []ContextualArgumentConfiguration
 
 type FederationInfo interface {
 	HasKeyRequirement(typeName, requiresFields string) bool
@@ -26,6 +51,7 @@ type FederationInfo interface {
 	HasInterfaceObject(typeName string) bool
 	HasEntityInterface(typeName string) bool
 	EntityInterfaceNames() []string
+	ContextualArgumentsForField(typeName, fieldName string) []ContextualArgumentConfiguration
 }
 
 func (d *FederationMetaData) HasKeyRequirement(typeName, requiresFields string) bool {
@@ -67,6 +93,26 @@ func (d *FederationMetaData) EntityInterfaceNames() (out []string) {
 	}
 
 	return out
+}
+
+func (d *FederationMetaData) ContextualArgumentsForField(typeName, fieldName string) []ContextualArgumentConfiguration {
+	if d.contextualArgumentsByField == nil {
+		return nil
+	}
+	return d.contextualArgumentsByField[contextualArgumentFieldKey{typeName: typeName, fieldName: fieldName}]
+}
+
+func (d *FederationMetaData) initContextualArguments() {
+	d.contextualArgumentsByField = nil
+	if len(d.ContextualArguments) == 0 {
+		return
+	}
+
+	d.contextualArgumentsByField = make(map[contextualArgumentFieldKey][]ContextualArgumentConfiguration, len(d.ContextualArguments))
+	for i := range d.ContextualArguments {
+		key := contextualArgumentFieldKey{typeName: d.ContextualArguments[i].TypeName, fieldName: d.ContextualArguments[i].FieldName}
+		d.contextualArgumentsByField[key] = append(d.contextualArgumentsByField[key], d.ContextualArguments[i])
+	}
 }
 
 type EntityInterfaceConfiguration struct {

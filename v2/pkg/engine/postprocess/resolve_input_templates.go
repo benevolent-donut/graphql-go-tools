@@ -51,7 +51,10 @@ func (r *resolveInputTemplates) traverseNode(node *resolve.FetchTreeNode) {
 func (r *resolveInputTemplates) traverseSingleFetch(fetch *resolve.SingleFetch) {
 	r.resolveInputTemplate(fetch.Variables, fetch.Input, &fetch.InputTemplate)
 	fetch.Input = ""
-	fetch.Variables = nil
+	// createConcreteSingleFetchTypes runs next and copies the captures of contextual argument variables.
+	if !hasContextualArgumentVariable(fetch.Variables) {
+		fetch.Variables = nil
+	}
 	fetch.InputTemplate.SetTemplateOutputToNullOnVariableNull = fetch.SetTemplateOutputToNullOnVariableNull
 	fetch.SetTemplateOutputToNullOnVariableNull = false
 }

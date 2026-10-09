@@ -241,6 +241,20 @@ func TestCreateMultiFetch_CollectGroups(t *testing.T) {
 		))
 		require.Empty(t, collectGroups(c, tree))
 	})
+
+	t.Run("fetch with a contextual argument variable is not a candidate", func(t *testing.T) {
+		bad := multiFetchCandidate(2, []int{0}, 0, "ds1")
+		badFetch := bad.Item.Fetch.(*resolve.SingleFetch)
+		badFetch.Variables = append(badFetch.Variables, &resolve.ContextualArgumentVariable{
+			Capture: resolve.ContextualArgumentCapture{VariableName: "contextualArgument_0"},
+		})
+		tree := organizeForTest(resolve.Sequence(
+			multiFetchNonCandidate(0, nil, 0),
+			multiFetchCandidate(1, []int{0}, 0, "ds1"),
+			bad,
+		))
+		require.Empty(t, collectGroups(c, tree))
+	})
 }
 
 func TestCreateMultiFetch_RepresentationsFragmentIndex(t *testing.T) {
@@ -880,5 +894,76 @@ func TestCreateMultiFetch_MergeGroupAborts(t *testing.T) {
 		c.mergeGroup(root, root, []*resolve.FetchTreeNode{node1, node2})
 		require.Len(t, root.ChildNodes, 2)
 		require.False(t, treeHasMultiEntityFetch(root))
+	})
+}
+
+func TestCreateMultiFetch_ContextualArgumentFetchesAreNotMerged(t *testing.T) {
+	const source = `query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $contextualArgument_0){displayName}}}}`
+	input := `{"method":"POST","url":"http://x","body":{"query":"` + source + `","variables":{"representations":[$$0$$],"contextualArgument_0":$$1$$}}}`
+
+	process := func(t *testing.T, first, second resolve.Variable) *resolve.FetchTreeNode {
+		t.Helper()
+		member := func(fetchID int, mergePath string, variable resolve.Variable) *resolve.FetchItem {
+			return buildMergeMember(t, mergeMemberSpec{
+				fetchID: fetchID, deps: []int{0}, input: input, source: source, batch: true, mergePath: mergePath,
+				fragments:    []resolve.SubgraphVariable{{Name: "representations", Value: []byte("[$$0$$]")}, {Name: "contextualArgument_0", Value: []byte("$$1$$")}},
+				variables:    resolve.NewVariables(resolve.NewResolvableObjectVariable(&resolve.Object{}), variable),
+				responsePath: mergePath,
+			})
+		}
+		p := &plan.SynchronousResponsePlan{
+			Response: &resolve.GraphQLResponse{
+				RawFetches: []*resolve.FetchItem{
+					buildMergeNonCandidate(0, nil, `{"q":"0"}`),
+					member(1, "a", first),
+					member(2, "b", second),
+				},
+				Data: &resolve.Object{},
+			},
+		}
+		NewProcessor(EnableMultiFetch()).Process(p)
+		return p.Response.Fetches
+	}
+
+	t.Run("the same fetches with a plain variable are merged", func(t *testing.T) {
+		tree := process(t,
+			&resolve.ContextVariable{Path: []string{"a"}, Renderer: resolve.NewJSONVariableRenderer()},
+			&resolve.ContextVariable{Path: []string{"a"}, Renderer: resolve.NewJSONVariableRenderer()},
+		)
+		require.True(t, treeHasMultiEntityFetch(tree))
+	})
+
+	t.Run("fetches with contextual argument variables stay batch entity fetches", func(t *testing.T) {
+		capture := func(setterTypeName string) resolve.ContextualArgumentCapture {
+			return resolve.ContextualArgumentCapture{
+				VariableName: "contextualArgument_0",
+				Levels: []resolve.ContextualArgumentLevel{
+					{Depth: 1, Setters: []resolve.ContextualArgumentSetter{{TypeName: setterTypeName, Path: []string{"__context_0"}}}},
+				},
+			}
+		}
+		moderationQueue, appealQueue := capture("ModerationQueue"), capture("AppealQueue")
+
+		tree := process(t,
+			&resolve.ContextualArgumentVariable{Capture: moderationQueue},
+			&resolve.ContextualArgumentVariable{Capture: appealQueue},
+		)
+		require.False(t, treeHasMultiEntityFetch(tree))
+
+		require.Equal(t, resolve.FetchTreeNodeKindSequence, tree.Kind)
+		require.Len(t, tree.ChildNodes, 2)
+		parallel := tree.ChildNodes[1]
+		require.Equal(t, resolve.FetchTreeNodeKindParallel, parallel.Kind)
+		require.Len(t, parallel.ChildNodes, 2)
+
+		first, ok := parallel.ChildNodes[0].Item.Fetch.(*resolve.BatchEntityFetch)
+		require.True(t, ok)
+		require.Equal(t, 1, first.FetchID)
+		require.Equal(t, []resolve.ContextualArgumentCapture{moderationQueue}, first.ContextualArguments)
+
+		second, ok := parallel.ChildNodes[1].Item.Fetch.(*resolve.BatchEntityFetch)
+		require.True(t, ok)
+		require.Equal(t, 2, second.FetchID)
+		require.Equal(t, []resolve.ContextualArgumentCapture{appealQueue}, second.ContextualArguments)
 	})
 }

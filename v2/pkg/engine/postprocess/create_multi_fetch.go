@@ -371,6 +371,10 @@ func (c *createMultiFetch) isCandidate(node *resolve.FetchTreeNode) bool {
 	if fetch.SubgraphOperation == nil || fetch.Info == nil {
 		return false
 	}
+	// A contextual fetch sends one request per group of context values, which a merged entry cannot express.
+	if hasContextualArgumentVariable(fetch.Variables) {
+		return false
+	}
 	return representationsFragmentIndex(fetch) != -1
 }
 
