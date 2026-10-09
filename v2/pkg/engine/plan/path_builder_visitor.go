@@ -803,15 +803,6 @@ func (c *pathBuilderVisitor) addFieldDependencies(field *currentFieldInfo, curre
 	slices.Sort(fetchConfiguration.dependsOnFetchIDs)
 }
 
-// hasContextBoundary reports whether some contextual argument of the field can be set by an ancestor,
-// so the field has to be planned in its own entity fetch.
-func (c *pathBuilderVisitor) hasContextBoundary(fieldKey fieldIndexKey) bool {
-	return slices.ContainsFunc(c.fieldContextRequirements[fieldKey], func(requirement contextualArgumentRequirement) bool {
-		return len(requirement.levels) > 0
-	})
-}
-
-// addContextualArgumentPlans passes the capture or the null decision of each contextual argument to the planner.
 func (c *pathBuilderVisitor) addContextualArgumentPlans(field *currentFieldInfo, plannerIdx int) {
 	requirements, ok := c.fieldContextRequirements[fieldIndexKey{field.fieldRef, field.ds.Hash()}]
 	if !ok {
@@ -830,7 +821,7 @@ func (c *pathBuilderVisitor) addContextualArgumentPlans(field *currentFieldInfo,
 			FieldRef:     field.fieldRef,
 			ArgumentName: requirement.argumentName,
 		}
-		if requirement.levels != nil {
+		if len(requirement.levels) > 0 {
 			argumentPlan.Capture = &resolve.ContextualArgumentCapture{Levels: requirement.levels}
 		}
 		fetchConfiguration.contextualArguments = append(fetchConfiguration.contextualArguments, argumentPlan)
@@ -959,7 +950,7 @@ func (c *pathBuilderVisitor) planWithExistingPlanners(field *currentFieldInfo) (
 			}
 		}
 
-		if c.hasContextBoundary(fieldKey) {
+		if hasContextCandidate(c.fieldContextRequirements[fieldKey]) {
 			// the items of the fetch have to be exactly the parent objects of the field,
 			// and the fetch has to run after the fetches resolving the context values
 			if plannerConfig.ParentPath() != field.parentPath && plannerConfig.ParentPath() != field.precedingParentPath {

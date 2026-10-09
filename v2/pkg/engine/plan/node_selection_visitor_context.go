@@ -12,7 +12,6 @@ import (
 
 const contextAliasPrefix = "__context_"
 
-// contextualArgumentRequirement is the planning decision for one contextual argument of a consumer field.
 type contextualArgumentRequirement struct {
 	argumentName string
 	// levels lists the ancestor levels that can set the context, nearest first; nil when no level can.
@@ -34,8 +33,9 @@ type pendingContextInjection struct {
 	fieldSet      string
 	setterType    string
 	selection     string
-	alias         []byte // nil for the __typename of an abstract level
+	alias         []byte
 	abstract      bool
+	isTypename    bool // the __typename of an abstract level, which has no alias
 	ownerFieldRef int
 	deferInfo     *DeferInfo
 	requestedBy   []fieldIndexKey
@@ -60,7 +60,7 @@ func (c *nodeSelectionVisitor) handleFieldContextArguments(fieldCtx fieldRequire
 	}
 
 	// the parent can be selected on more data sources in later walks, so the boundary is checked until it is added
-	if _, added := c.contextKeyBoundaries[fieldKey]; !added && c.hasContextCandidate(fieldKey) {
+	if _, added := c.contextKeyBoundaries[fieldKey]; !added && hasContextCandidate(c.fieldContextRequirements[fieldKey]) {
 		c.addContextKeyBoundary(fieldCtx, fieldKey)
 	}
 }
@@ -90,14 +90,13 @@ func (c *nodeSelectionVisitor) planFieldContextArguments(fieldKey fieldIndexKey,
 	return true
 }
 
-func (c *nodeSelectionVisitor) hasContextCandidate(fieldKey fieldIndexKey) bool {
-	return slices.ContainsFunc(c.fieldContextRequirements[fieldKey], func(requirement contextualArgumentRequirement) bool {
+func hasContextCandidate(requirements []contextualArgumentRequirement) bool {
+	return slices.ContainsFunc(requirements, func(requirement contextualArgumentRequirement) bool {
 		return len(requirement.levels) > 0
 	})
 }
 
-// contextPathLevels derives the levels from the walker ancestors; in the selection set pre-pass
-// the last ancestor owns the selection set of the consumer.
+// Runs in the pre-pass of the consumer's selection set, so the objects of the consumer's parent never form a level.
 func (c *nodeSelectionVisitor) contextPathLevels() (levels []contextPathLevel, ok bool) {
 	ancestors := c.walker.Ancestors
 	if len(ancestors) == 0 || ancestors[0].Kind != ast.NodeKindOperationDefinition {
@@ -168,8 +167,6 @@ func (c *nodeSelectionVisitor) rootOperationTypeName(operationType ast.Operation
 	return string(typeName), len(typeName) > 0
 }
 
-// contextCandidateLevels collects the levels that can set the context, nearest first, and queues their injections.
-// Collection stops at the first static level, because it matches every object.
 func (c *nodeSelectionVisitor) contextCandidateLevels(consumer fieldIndexKey, levels []contextPathLevel, argument ContextualArgumentConfiguration) (candidates []resolve.ContextualArgumentLevel, ok bool) {
 	for _, level := range slices.Backward(levels) {
 		possibleTypes, abstract := c.contextLevelPossibleTypes(level)
@@ -209,6 +206,7 @@ func (c *nodeSelectionVisitor) contextCandidateLevels(consumer fieldIndexKey, le
 			Setters:         setters,
 		})
 
+		// a static level matches every object, so the loader never reads a farther level
 		if !abstract {
 			break
 		}
@@ -217,8 +215,6 @@ func (c *nodeSelectionVisitor) contextCandidateLevels(consumer fieldIndexKey, le
 	return candidates, true
 }
 
-// contextLevelPossibleTypes returns the object types that can occur at the level, taken from the upstream schema
-// of every data source the owner field is selected on.
 func (c *nodeSelectionVisitor) contextLevelPossibleTypes(level contextPathLevel) (typeNames []string, abstract bool) {
 	node, ok := c.definition.NodeByNameStr(level.typeName)
 	if !ok {
@@ -232,6 +228,7 @@ func (c *nodeSelectionVisitor) contextLevelPossibleTypes(level contextPathLevel)
 
 	levelTypeNames := c.definitionObjectTypeNames(node)
 
+	// only the types that every data source selecting the owner field defines can occur at the level
 	for i, dsHash := range c.selectedDataSourceHashes(level.ownerFieldRef) {
 		dsIdx := slices.IndexFunc(c.dataSources, func(d DataSource) bool {
 			return d.Hash() == dsHash
@@ -256,8 +253,6 @@ func (c *nodeSelectionVisitor) contextLevelPossibleTypes(level contextPathLevel)
 	return typeNames, abstract
 }
 
-// ownerFieldTypeNames returns the object types the owner field can return from the data source,
-// with the lookups the abstract selection rewriter uses.
 func (c *nodeSelectionVisitor) ownerFieldTypeNames(ds DataSource, level contextPathLevel) []string {
 	enclosingNode, ok := c.definition.NodeByNameStr(level.ownerTypeName)
 	if !ok {
@@ -319,8 +314,6 @@ func (c *nodeSelectionVisitor) selectedDataSourceHashes(fieldRef int) (out []DSH
 	return out
 }
 
-// contextSelectionPath returns the response keys from a setter object to the context value.
-// The selection is reused when the target already holds it under a context alias, otherwise its injection is queued.
 func (c *nodeSelectionVisitor) contextSelectionPath(consumer fieldIndexKey, level contextPathLevel, abstract bool, setter ContextSetterConfiguration) (path []string, ok bool) {
 	key, report := RequiredFieldsFragment(setter.TypeName, setter.SelectionSet, false)
 	if report.HasErrors() {
@@ -334,14 +327,14 @@ func (c *nodeSelectionVisitor) contextSelectionPath(consumer fieldIndexKey, leve
 		return nil, false
 	}
 
-	if fieldRef, found := c.findContextField(level.targetSetRef, abstract, setter.TypeName, key, keyFieldRef); found {
-		c.addContextDependencies(consumer, c.contextFieldChainRefs(fieldRef, nestedPath))
-		return append([]string{c.operation.FieldAliasString(fieldRef)}, nestedPath...), true
+	if fieldRefs := c.findContextField(level.targetSetRef, abstract, setter.TypeName, key, keyFieldRef); len(fieldRefs) > 0 {
+		c.addContextDependencies(consumer, fieldRefs)
+		return append([]string{c.operation.FieldAliasString(fieldRefs[0])}, nestedPath...), true
 	}
 
 	pending := c.pendingContextInjections[level.targetSetRef]
 	for i := range pending {
-		if pending[i].alias != nil && pending[i].setterType == setter.TypeName && pending[i].selection == setter.SelectionSet && pending[i].abstract == abstract {
+		if !pending[i].isTypename && pending[i].setterType == setter.TypeName && pending[i].selection == setter.SelectionSet && pending[i].abstract == abstract {
 			pending[i].requestedBy = append(pending[i].requestedBy, consumer)
 			return append([]string{string(pending[i].alias)}, nestedPath...), true
 		}
@@ -388,7 +381,6 @@ func contextSelectionChain(key *ast.Document, selectionSetRef int) (fieldRef int
 	return fieldRef, nestedPath, true
 }
 
-// contextSelectionField returns the single field of a context selection set, looking through inline fragments.
 func contextSelectionField(document *ast.Document, selectionSetRef int) (fieldRef int, ok bool) {
 	fieldRef = ast.InvalidRef
 	for _, selectionRef := range document.SelectionSets[selectionSetRef].SelectionRefs {
@@ -416,11 +408,9 @@ func contextSelectionField(document *ast.Document, selectionSetRef int) (fieldRe
 	return fieldRef, fieldRef != ast.InvalidRef
 }
 
-// findContextField searches the target selection set and, for an abstract level, its inline fragments
-// on the setter type for a context aliased field equal to the selection.
-func (c *nodeSelectionVisitor) findContextField(selectionSetRef int, abstract bool, setterType string, key *ast.Document, keyFieldRef int) (fieldRef int, ok bool) {
-	if fieldRef, ok = c.findContextFieldInSelectionSet(selectionSetRef, key, keyFieldRef); ok || !abstract {
-		return fieldRef, ok
+func (c *nodeSelectionVisitor) findContextField(selectionSetRef int, abstract bool, setterType string, key *ast.Document, keyFieldRef int) (fieldRefs []int) {
+	if fieldRefs = c.findContextFieldInSelectionSet(selectionSetRef, key, keyFieldRef); fieldRefs != nil || !abstract {
+		return fieldRefs
 	}
 
 	for _, selectionRef := range c.operation.SelectionSets[selectionSetRef].SelectionRefs {
@@ -432,15 +422,15 @@ func (c *nodeSelectionVisitor) findContextField(selectionSetRef int, abstract bo
 		if !hasSelections {
 			continue
 		}
-		if fieldRef, ok = c.findContextFieldInSelectionSet(fragmentSetRef, key, keyFieldRef); ok {
-			return fieldRef, true
+		if fieldRefs = c.findContextFieldInSelectionSet(fragmentSetRef, key, keyFieldRef); fieldRefs != nil {
+			return fieldRefs
 		}
 	}
 
-	return ast.InvalidRef, false
+	return nil
 }
 
-func (c *nodeSelectionVisitor) findContextFieldInSelectionSet(selectionSetRef int, key *ast.Document, keyFieldRef int) (fieldRef int, ok bool) {
+func (c *nodeSelectionVisitor) findContextFieldInSelectionSet(selectionSetRef int, key *ast.Document, keyFieldRef int) []int {
 	for _, selectionRef := range c.operation.SelectionSets[selectionSetRef].SelectionRefs {
 		selection := c.operation.Selections[selectionRef]
 		if selection.Kind != ast.SelectionKindField || !c.operation.FieldAliasIsDefined(selection.Ref) {
@@ -449,20 +439,64 @@ func (c *nodeSelectionVisitor) findContextFieldInSelectionSet(selectionSetRef in
 		if !bytes.HasPrefix(c.operation.FieldAliasBytes(selection.Ref), []byte(contextAliasPrefix)) {
 			continue
 		}
-		if c.contextFieldMatches(selection.Ref, key, keyFieldRef) {
-			return selection.Ref, true
+		// a client field can use the same alias, for example in a deferred fragment, so only planner fields are reused
+		if !slices.Contains(c.skipFieldsRefs, selection.Ref) {
+			continue
+		}
+		if fieldRefs := c.matchContextField(selection.Ref, key, keyFieldRef); fieldRefs != nil {
+			return fieldRefs
 		}
 	}
-	return ast.InvalidRef, false
+	return nil
 }
 
-// contextFieldMatches compares an operation field with a field of a context selection by name, arguments
-// and sub-selection, ignoring aliases, directives and __typename selections.
-func (c *nodeSelectionVisitor) contextFieldMatches(fieldRef int, key *ast.Document, keyFieldRef int) bool {
-	if !bytes.Equal(c.operation.FieldNameBytes(fieldRef), key.FieldNameBytes(keyFieldRef)) {
-		return false
+// Fields the planner adds next to the selected fields, such as key fields for a jump to another subgraph, are ignored.
+func (c *nodeSelectionVisitor) matchContextField(fieldRef int, key *ast.Document, keyFieldRef int) []int {
+	if !bytes.Equal(c.operation.FieldNameBytes(fieldRef), key.FieldNameBytes(keyFieldRef)) || !c.contextArgumentsEqual(fieldRef, key, keyFieldRef) {
+		return nil
 	}
 
+	if !key.FieldHasSelections(keyFieldRef) {
+		if c.operation.FieldHasSelections(fieldRef) {
+			return nil
+		}
+		return []int{fieldRef}
+	}
+	if !c.operation.FieldHasSelections(fieldRef) {
+		return nil
+	}
+
+	keyChildRef, ok := contextSelectionField(key, key.Fields[keyFieldRef].SelectionSet)
+	if !ok {
+		return nil
+	}
+	nestedFieldRefs := c.matchNestedContextFields(c.operation.Fields[fieldRef].SelectionSet, key, keyChildRef)
+	if nestedFieldRefs == nil {
+		return nil
+	}
+	return append([]int{fieldRef}, nestedFieldRefs...)
+}
+
+// An abstract rewrite puts copies of a nested field into inline fragments, which match too;
+// aliased fields never match, because the capture path reads field names.
+func (c *nodeSelectionVisitor) matchNestedContextFields(selectionSetRef int, key *ast.Document, keyFieldRef int) (fieldRefs []int) {
+	for _, selectionRef := range c.operation.SelectionSets[selectionSetRef].SelectionRefs {
+		selection := c.operation.Selections[selectionRef]
+		switch selection.Kind {
+		case ast.SelectionKindField:
+			if !c.operation.FieldAliasIsDefined(selection.Ref) {
+				fieldRefs = append(fieldRefs, c.matchContextField(selection.Ref, key, keyFieldRef)...)
+			}
+		case ast.SelectionKindInlineFragment:
+			if fragmentSetRef, hasSelections := c.operation.InlineFragmentSelectionSet(selection.Ref); hasSelections {
+				fieldRefs = append(fieldRefs, c.matchNestedContextFields(fragmentSetRef, key, keyFieldRef)...)
+			}
+		}
+	}
+	return fieldRefs
+}
+
+func (c *nodeSelectionVisitor) contextArgumentsEqual(fieldRef int, key *ast.Document, keyFieldRef int) bool {
 	arguments, keyArguments := c.operation.FieldArguments(fieldRef), key.FieldArguments(keyFieldRef)
 	if len(arguments) != len(keyArguments) {
 		return false
@@ -473,50 +507,7 @@ func (c *nodeSelectionVisitor) contextFieldMatches(fieldRef int, key *ast.Docume
 			return false
 		}
 	}
-
-	if !key.FieldHasSelections(keyFieldRef) {
-		return !c.operation.FieldHasSelections(fieldRef)
-	}
-	if !c.operation.FieldHasSelections(fieldRef) {
-		return false
-	}
-
-	keyChildRef, ok := contextSelectionField(key, key.Fields[keyFieldRef].SelectionSet)
-	if !ok {
-		return false
-	}
-	childRef, ok := c.contextSelectionFieldIgnoringTypename(c.operation.Fields[fieldRef].SelectionSet)
-	return ok && c.contextFieldMatches(childRef, key, keyChildRef)
-}
-
-func (c *nodeSelectionVisitor) contextSelectionFieldIgnoringTypename(selectionSetRef int) (fieldRef int, ok bool) {
-	fieldRef = ast.InvalidRef
-	for _, selectionRef := range c.operation.SelectionSets[selectionSetRef].SelectionRefs {
-		selection := c.operation.Selections[selectionRef]
-		var candidate int
-		switch selection.Kind {
-		case ast.SelectionKindField:
-			if bytes.Equal(c.operation.FieldNameBytes(selection.Ref), typeNameFieldBytes) && !c.operation.FieldAliasIsDefined(selection.Ref) {
-				continue
-			}
-			candidate = selection.Ref
-		case ast.SelectionKindInlineFragment:
-			fragmentSetRef, hasSelections := c.operation.InlineFragmentSelectionSet(selection.Ref)
-			if !hasSelections {
-				continue
-			}
-			if candidate, ok = c.contextSelectionFieldIgnoringTypename(fragmentSetRef); !ok {
-				return ast.InvalidRef, false
-			}
-		default:
-			return ast.InvalidRef, false
-		}
-		if fieldRef != ast.InvalidRef {
-			return ast.InvalidRef, false
-		}
-		fieldRef = candidate
-	}
-	return fieldRef, fieldRef != ast.InvalidRef
+	return true
 }
 
 func contextValuesEqual(left *ast.Document, leftValue ast.Value, right *ast.Document, rightValue ast.Value) bool {
@@ -525,23 +516,6 @@ func contextValuesEqual(left *ast.Document, leftValue ast.Value, right *ast.Docu
 		return false
 	}
 	return bytes.Equal(leftBuf.Bytes(), rightBuf.Bytes())
-}
-
-func (c *nodeSelectionVisitor) contextFieldChainRefs(fieldRef int, nestedPath []string) []int {
-	refs := []int{fieldRef}
-	current := fieldRef
-	for _, name := range nestedPath {
-		if !c.operation.FieldHasSelections(current) {
-			break
-		}
-		next, ok := c.contextSelectionFieldIgnoringTypename(c.operation.Fields[current].SelectionSet)
-		if !ok || c.operation.FieldNameString(next) != name {
-			break
-		}
-		refs = append(refs, next)
-		current = next
-	}
-	return refs
 }
 
 func (c *nodeSelectionVisitor) nextContextAlias(levelSetRef int) []byte {
@@ -555,7 +529,7 @@ func (c *nodeSelectionVisitor) nextContextAlias(levelSetRef int) []byte {
 	return alias
 }
 
-// selectionSetHasResponseName checks the selection set and the inline fragments at the same response level.
+// A name used in any fragment at the same response level would merge with the alias in the response.
 func (c *nodeSelectionVisitor) selectionSetHasResponseName(selectionSetRef int, responseName []byte) bool {
 	if exists, _ := c.operation.SelectionSetHasFieldSelectionWithNameOrAliasBytes(selectionSetRef, responseName); exists {
 		return true
@@ -575,11 +549,10 @@ func (c *nodeSelectionVisitor) selectionSetHasResponseName(selectionSetRef int, 
 	return false
 }
 
-// queueContextLevelTypename makes sure an abstract level selects __typename in the owner's defer scope,
-// which the loader uses to match setters.
+// The loader matches the setters of an abstract level by __typename.
 func (c *nodeSelectionVisitor) queueContextLevelTypename(level contextPathLevel) {
 	for _, pending := range c.pendingContextInjections[level.targetSetRef] {
-		if pending.alias == nil {
+		if pending.isTypename {
 			return
 		}
 	}
@@ -587,6 +560,7 @@ func (c *nodeSelectionVisitor) queueContextLevelTypename(level contextPathLevel)
 	c.queueContextInjection(level.targetSetRef, pendingContextInjection{
 		typeName:      level.typeName,
 		abstract:      true,
+		isTypename:    true,
 		ownerFieldRef: level.ownerFieldRef,
 		deferInfo:     c.ownerDeferInfo(level.ownerFieldRef),
 	})
@@ -624,7 +598,7 @@ func (c *nodeSelectionVisitor) processPendingContextInjections(selectionSetRef i
 			operation:                c.operation,
 			definition:               c.definition,
 			operationSelectionSetRef: selectionSetRef,
-			allowTypename:            injection.alias == nil,
+			allowTypename:            injection.isTypename,
 			typeName:                 injection.typeName,
 			fieldSet:                 injection.fieldSet,
 			deferInfo:                injection.deferInfo,
@@ -677,10 +651,9 @@ func (c *nodeSelectionVisitor) addContextDependencies(consumer fieldIndexKey, fi
 	}
 }
 
-// addContextKeyBoundary forces an entity fetch for a consumer whose parent is selected on its own data source.
-// The ordinary key jump covers a parent selected only on other data sources.
 func (c *nodeSelectionVisitor) addContextKeyBoundary(fieldCtx fieldRequirementsContext, fieldKey fieldIndexKey) {
 	dsHash := fieldCtx.dsConfig.Hash()
+	// a parent selected only on other data sources gets the ordinary key jump
 	if !slices.Contains(c.getSelectedParentsDSHashes(fieldCtx.fieldRef), dsHash) {
 		return
 	}
@@ -708,7 +681,6 @@ func (c *nodeSelectionVisitor) addContextKeyBoundary(fieldCtx fieldRequirementsC
 	}, false)
 }
 
-// contextBoundaryKey returns the first resolvable key whose fields the data source resolves itself.
 func contextBoundaryKey(ds DataSource, typeName string) (FederationFieldConfiguration, bool) {
 	for _, key := range ds.RequiredFieldsByKey(typeName) {
 		if err := key.parseSelectionSet(); err != nil {
@@ -733,7 +705,6 @@ func contextBoundaryKey(ds DataSource, typeName string) (FederationFieldConfigur
 	return FederationFieldConfiguration{}, false
 }
 
-// pruneContextRequirements drops the context requirements of consumers no longer selected on their data source.
 func (c *nodeSelectionVisitor) pruneContextRequirements(isSelected func(fieldRef int, dsHash DSHash) bool) {
 	for fieldKey := range c.fieldContextRequirements {
 		if isSelected(fieldKey.fieldRef, fieldKey.dsHash) {

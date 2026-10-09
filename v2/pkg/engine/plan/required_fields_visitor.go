@@ -335,8 +335,8 @@ func (v *requiredFieldsVisitor) EnterField(ref int) {
 	v.handleRequiredField(fi)
 }
 
-// handleContextField adds a field of a context selection. The root level __typename of an abstract level
-// is reused when it is in the owner's defer scope; every other field is added, never reused.
+// Only the __typename of an abstract level is reused, in the owner's defer scope; any other existing field
+// could be aliased or deferred differently from the owner.
 func (v *requiredFieldsVisitor) handleContextField(fi requiredFieldInfo) {
 	if fi.isTypeName && v.config.allowTypename && v.isRootLevel() {
 		if !v.selectionSetHasTypeNameInDeferScope(fi.selectionSetRef) {
@@ -382,10 +382,14 @@ func (v *requiredFieldsVisitor) handleContextField(fi requiredFieldInfo) {
 	}
 }
 
-// isContextInjectionRoot reports whether the current field is the top level field of the context selection,
-// or the field inside its top level inline fragment.
 func (v *requiredFieldsVisitor) isContextInjectionRoot() bool {
-	return v.isRootLevel() || (len(v.OperationNodes) == 3 && v.OperationNodes[1].Kind == ast.NodeKindInlineFragment)
+	return v.isRootLevel() || v.isRootInlineFragmentLevel()
+}
+
+// isRootInlineFragmentLevel reports whether only the root selection set, a top level inline fragment
+// and its selection set are on the stack.
+func (v *requiredFieldsVisitor) isRootInlineFragmentLevel() bool {
+	return len(v.OperationNodes) == 3 && v.OperationNodes[1].Kind == ast.NodeKindInlineFragment
 }
 
 func (v *requiredFieldsVisitor) selectionSetHasTypeNameInDeferScope(selectionSetRef int) bool {

@@ -5,11 +5,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jensneuse/abstractlogger"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astnormalization"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/asttransform"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvalidation"
 	. "github.com/wundergraph/graphql-go-tools/v2/pkg/engine/datasourcetesting"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/plan"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/postprocess"
@@ -856,6 +859,183 @@ func contextualArgumentsContributedImplementationConfiguration(t *testing.T) pla
 		DisableResolveFieldPositions: true,
 		Fields: plan.FieldConfigurations{
 			{TypeName: "User", FieldName: "profile", Arguments: plan.ArgumentsConfigurations{{Name: "includeSuspended", SourceType: plan.ContextualArgumentSource}}},
+		},
+	}
+}
+
+const contextualArgumentsNestedSelectionDefinition = `
+	type Query {
+		queues: [Queue!]!
+	}
+
+	interface Queue {
+		id: ID!
+		subqueues: [Queue!]!
+		flaggedUsers: [User!]!
+	}
+
+	type ModerationQueue implements Queue {
+		id: ID!
+		team: Team
+		subqueues: [Queue!]!
+		flaggedUsers: [User!]!
+	}
+
+	type AppealQueue implements Queue {
+		id: ID!
+		subqueues: [Queue!]!
+		flaggedUsers: [User!]!
+	}
+
+	type Team {
+		id: ID!
+		name: String
+	}
+
+	type User {
+		id: ID!
+		teamView: String
+		teamTypeView: String
+	}
+`
+
+// contextualArgumentsNestedSelectionConfiguration plans the setter subgraph with flattened fragments, and its context
+// selections read a nested field: Team.name is owned by a third subgraph, Team.__typename by the setter subgraph.
+func contextualArgumentsNestedSelectionConfiguration(t *testing.T) plan.Configuration {
+	moderationSDL := `
+		type Query {
+			queues: [Queue!]!
+		}
+
+		interface Queue {
+			id: ID!
+			subqueues: [Queue!]!
+			flaggedUsers: [User!]!
+		}
+
+		type ModerationQueue implements Queue @key(fields: "id") {
+			id: ID!
+			team: Team
+			subqueues: [Queue!]!
+			flaggedUsers: [User!]!
+		}
+
+		type AppealQueue implements Queue @key(fields: "id") {
+			id: ID!
+			subqueues: [Queue!]!
+			flaggedUsers: [User!]!
+		}
+
+		type Team @key(fields: "id") {
+			id: ID!
+		}
+
+		type User @key(fields: "id", resolvable: false) {
+			id: ID!
+		}
+	`
+
+	publicSDL := `
+		type Team @key(fields: "id") {
+			id: ID!
+			name: String
+		}
+	`
+
+	usersSDL := `
+		type ModerationQueue @key(fields: "id") @context(name: "teamScope") @context(name: "teamTypeScope") {
+			id: ID!
+			team: Team @external
+		}
+
+		type Team @key(fields: "id") {
+			id: ID!
+			name: String @external
+		}
+
+		type User @key(fields: "id") {
+			id: ID!
+			teamView(teamName: String @fromContext(field: "$teamScope { team { name } }")): String
+			teamTypeView(typeName: String @fromContext(field: "$teamTypeScope { team { __typename } }")): String
+		}
+	`
+
+	moderation, err := plan.NewDataSourceConfiguration[Configuration]("moderation", contextualArgumentsFlatteningFactory{&Factory[Configuration]{}},
+		&plan.DataSourceMetadata{
+			RootNodes: []plan.TypeField{
+				{TypeName: "Query", FieldNames: []string{"queues"}},
+				{TypeName: "ModerationQueue", FieldNames: []string{"id", "team", "subqueues", "flaggedUsers"}},
+				{TypeName: "AppealQueue", FieldNames: []string{"id", "subqueues", "flaggedUsers"}},
+				{TypeName: "Team", FieldNames: []string{"id"}},
+				{TypeName: "User", FieldNames: []string{"id"}},
+			},
+			ChildNodes: []plan.TypeField{
+				{TypeName: "Queue", FieldNames: []string{"id", "subqueues", "flaggedUsers"}},
+			},
+			FederationMetaData: plan.FederationMetaData{
+				Keys: plan.FederationFieldConfigurations{
+					{TypeName: "ModerationQueue", SelectionSet: "id"},
+					{TypeName: "AppealQueue", SelectionSet: "id"},
+					{TypeName: "Team", SelectionSet: "id"},
+					{TypeName: "User", SelectionSet: "id", DisableEntityResolver: true},
+				},
+			},
+		},
+		mustCustomConfiguration(t, ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: "http://moderation"},
+			SchemaConfiguration: mustSchema(t, &FederationConfiguration{Enabled: true, ServiceSDL: moderationSDL}, moderationSDL),
+		}),
+	)
+	require.NoError(t, err)
+
+	public := mustDataSourceConfiguration(t, "public",
+		&plan.DataSourceMetadata{
+			RootNodes: []plan.TypeField{
+				{TypeName: "Team", FieldNames: []string{"id", "name"}},
+			},
+			FederationMetaData: plan.FederationMetaData{
+				Keys: plan.FederationFieldConfigurations{
+					{TypeName: "Team", SelectionSet: "id"},
+				},
+			},
+		},
+		mustCustomConfiguration(t, ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: "http://public"},
+			SchemaConfiguration: mustSchema(t, &FederationConfiguration{Enabled: true, ServiceSDL: publicSDL}, publicSDL),
+		}),
+	)
+
+	users := mustDataSourceConfiguration(t, "users",
+		&plan.DataSourceMetadata{
+			RootNodes: []plan.TypeField{
+				{TypeName: "ModerationQueue", FieldNames: []string{"id"}, ExternalFieldNames: []string{"team"}},
+				{TypeName: "Team", FieldNames: []string{"id"}, ExternalFieldNames: []string{"name"}},
+				{TypeName: "User", FieldNames: []string{"id", "teamView", "teamTypeView"}},
+			},
+			FederationMetaData: plan.FederationMetaData{
+				Keys: plan.FederationFieldConfigurations{
+					{TypeName: "ModerationQueue", SelectionSet: "id"},
+					{TypeName: "Team", SelectionSet: "id"},
+					{TypeName: "User", SelectionSet: "id"},
+				},
+				ContextualArguments: plan.ContextualArgumentConfigurations{
+					{TypeName: "User", FieldName: "teamView", ArgumentName: "teamName", ContextName: "teamScope", Setters: []plan.ContextSetterConfiguration{{TypeName: "ModerationQueue", SelectionSet: "team { name }"}}},
+					{TypeName: "User", FieldName: "teamTypeView", ArgumentName: "typeName", ContextName: "teamTypeScope", Setters: []plan.ContextSetterConfiguration{{TypeName: "ModerationQueue", SelectionSet: "team { __typename }"}}},
+				},
+			},
+		},
+		mustCustomConfiguration(t, ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: "http://users"},
+			SchemaConfiguration: mustSchema(t, &FederationConfiguration{Enabled: true, ServiceSDL: usersSDL}, usersSDL),
+		}),
+	)
+
+	return plan.Configuration{
+		DataSources:                  []plan.DataSource{moderation, public, users},
+		DisableResolveFieldPositions: true,
+		Fields: plan.FieldConfigurations{
+			{TypeName: "User", FieldName: "teamView", Arguments: plan.ArgumentsConfigurations{{Name: "teamName", SourceType: plan.ContextualArgumentSource}}},
+			{TypeName: "User", FieldName: "teamTypeView", Arguments: plan.ArgumentsConfigurations{{Name: "typeName", SourceType: plan.ContextualArgumentSource}}},
 		},
 	}
 }
@@ -1807,6 +1987,88 @@ func TestGraphQLDataSourceFederation_ContextualArguments(t *testing.T) {
 				WithDefaultPostProcessor(),
 			)
 		})
+
+		t.Run("client field equal to a context selection is not reused", func(t *testing.T) {
+			RunWithPermutations(t, contextualArgumentsDefinition, `
+				query ClientContextAlias {
+					moderationQueue(id: "q1") {
+						__context_0: includeSuspended
+						flaggedUsers {
+							profile {
+								displayName
+							}
+						}
+					}
+				}`,
+				"ClientContextAlias",
+				&plan.SynchronousResponsePlan{
+					Response: &resolve.GraphQLResponse{
+						Fetches: resolve.Sequence(
+							resolve.Single(contextualFetch(0, nil,
+								`{"method":"POST","url":"http://moderation","body":{"query":"query($a: ID!){moderationQueue(id: $a){__context_0: includeSuspended flaggedUsers {__typename id} __context_0_1: includeSuspended}}","variables":{"a":$$0$$}}}`,
+								contextualClientVariable("a"),
+							)),
+							resolve.SingleWithPath(contextualEntityFetch(1, []int{0}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $contextualArgument_0){displayName}}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+								contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_0_1")),
+								contextualRepresentation("User"),
+							), "moderationQueue.flaggedUsers", resolve.ObjectPath("moderationQueue"), resolve.ArrayPath("flaggedUsers")),
+						),
+						Data: &resolve.Object{
+							Fields: []*resolve.Field{
+								contextualField("moderationQueue", contextualQueue("moderationQueue", true,
+									contextualField("__context_0", &resolve.Boolean{Path: []string{"__context_0"}}),
+									contextualField("flaggedUsers", contextualUsers("flaggedUsers", contextualProfile())),
+								)),
+							},
+						},
+					},
+				},
+				planConfiguration,
+				WithDefaultPostProcessor(),
+			)
+		})
+
+		t.Run("client field aliased like a context selection with a nested alias is not reused", func(t *testing.T) {
+			RunWithPermutations(t, contextualArgumentsDefinition, `
+				query NestedClientAlias {
+					moderationQueue(id: "q1") {
+						__context_0: flaggedUsers {
+							uid: id
+						}
+						flaggedUsers {
+							peers
+						}
+					}
+				}`,
+				"NestedClientAlias",
+				&plan.SynchronousResponsePlan{
+					Response: &resolve.GraphQLResponse{
+						Fetches: resolve.Sequence(
+							resolve.Single(contextualFetch(0, nil,
+								`{"method":"POST","url":"http://moderation","body":{"query":"query($a: ID!){moderationQueue(id: $a){__context_0: flaggedUsers {uid: id} flaggedUsers {__typename id} __context_0_1: flaggedUsers {id}}}","variables":{"a":$$0$$}}}`,
+								contextualClientVariable("a"),
+							)),
+							resolve.SingleWithPath(contextualEntityFetch(1, []int{0}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: [ID]){_entities(representations: $representations){... on User {__typename peers(ids: $contextualArgument_0)}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+								contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_0_1", "id")),
+								contextualRepresentation("User"),
+							), "moderationQueue.flaggedUsers", resolve.ObjectPath("moderationQueue"), resolve.ArrayPath("flaggedUsers")),
+						),
+						Data: &resolve.Object{
+							Fields: []*resolve.Field{
+								contextualField("moderationQueue", contextualQueue("moderationQueue", true,
+									contextualField("__context_0", contextualUsers("__context_0", contextualField("uid", &resolve.Scalar{Path: []string{"uid"}}))),
+									contextualField("flaggedUsers", contextualUsers("flaggedUsers", contextualField("peers", &resolve.String{Path: []string{"peers"}, Nullable: true}))),
+								)),
+							},
+						},
+					},
+				},
+				planConfiguration,
+				WithDefaultPostProcessor(),
+			)
+		})
 	})
 
 	t.Run("dependencies", func(t *testing.T) {
@@ -2383,6 +2645,69 @@ func TestGraphQLDataSourceFederation_ContextualArguments(t *testing.T) {
 			)
 		})
 
+		t.Run("client field aliased like a context selection in a deferred fragment is not reused", func(t *testing.T) {
+			RunWithPermutations(t, contextualArgumentsDefinition, `
+				query DeferredClientAlias {
+					moderationQueue(id: "q1") {
+						... @defer {
+							__context_0: includeSuspended
+						}
+						flaggedUsers {
+							profile {
+								displayName
+							}
+						}
+					}
+				}`,
+				"DeferredClientAlias",
+				&plan.DeferResponsePlan{
+					Response: &resolve.GraphQLDeferResponse{
+						DeferDescriptors: map[int]resolve.DeferDescriptor{
+							1: {ID: 1, Path: []string{"moderationQueue"}},
+						},
+						Response: &resolve.GraphQLResponse{
+							Fetches: resolve.Sequence(
+								resolve.Single(contextualFetch(1, nil,
+									`{"method":"POST","url":"http://moderation","body":{"query":"query($a: ID!){moderationQueue(id: $a){flaggedUsers {__typename id} __context_0_1: includeSuspended}}","variables":{"a":$$0$$}}}`,
+									contextualClientVariable("a"),
+								)),
+								resolve.SingleWithPath(contextualEntityFetch(2, []int{1}, true,
+									`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $contextualArgument_0){displayName}}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+									contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_0_1")),
+									contextualRepresentation("User"),
+								), "moderationQueue.flaggedUsers", resolve.ObjectPath("moderationQueue"), resolve.ArrayPath("flaggedUsers")),
+							),
+							Data: &resolve.Object{
+								Fields: []*resolve.Field{
+									contextualField("moderationQueue", contextualQueue("moderationQueue", true,
+										&resolve.Field{
+											Name:  []byte("__context_0"),
+											Defer: &resolve.DeferField{DeferID: 1},
+											Value: &resolve.Boolean{Path: []string{"__context_0"}},
+										},
+										contextualField("flaggedUsers", contextualUsers("flaggedUsers", contextualProfile())),
+									)),
+								},
+							},
+						},
+						DeferTree: resolve.DeferSingle(&resolve.DeferFetchGroup{
+							DeferID: 1,
+							Fetches: resolve.Sequence(
+								resolve.Single(contextualDeferredFetch(contextualFetch(0, nil,
+									`{"method":"POST","url":"http://moderation","body":{"query":"query($a: ID!){moderationQueue(id: $a){__context_0: includeSuspended}}","variables":{"a":$$0$$}}}`,
+									contextualClientVariable("a"),
+								), 1)),
+							),
+						}),
+					},
+				},
+				planConfiguration,
+				WithDefaultPostProcessor(),
+				WithDefer(),
+				WithCalculateFieldDependencies(),
+			)
+		})
+
 		t.Run("injection under a deferred owner is fetched in the owner's defer scope", func(t *testing.T) {
 			RunWithPermutations(t, contextualArgumentsDefinition, `
 				query DeferredOwner {
@@ -2596,6 +2921,118 @@ func TestGraphQLDataSourceFederation_ContextualArguments(t *testing.T) {
 		})
 	})
 
+	t.Run("nested selections under flattened levels", func(t *testing.T) {
+		planConfiguration := contextualArgumentsNestedSelectionConfiguration(t)
+
+		users := func(fieldName string) *resolve.Array {
+			return contextualUsers("flaggedUsers", contextualField(fieldName, &resolve.String{Path: []string{fieldName}, Nullable: true}))
+		}
+		queue := func(fields ...*resolve.Field) *resolve.Object {
+			return contextualObject("", false, "Queue", []string{"AppealQueue", "ModerationQueue"}, fields...)
+		}
+		usersOfBothTypes := func(fieldName string) []*resolve.Field {
+			return []*resolve.Field{
+				contextualField("flaggedUsers", users(fieldName), "AppealQueue"),
+				contextualField("flaggedUsers", users(fieldName), "ModerationQueue"),
+			}
+		}
+
+		t.Run("typename leaf of a nested selection is reused after the rewrite", func(t *testing.T) {
+			RunWithPermutations(t, contextualArgumentsNestedSelectionDefinition, `
+				query TeamType {
+					queues {
+						flaggedUsers {
+							teamTypeView
+						}
+					}
+				}`,
+				"TeamType",
+				&plan.SynchronousResponsePlan{
+					Response: &resolve.GraphQLResponse{
+						Fetches: resolve.Sequence(
+							resolve.Single(contextualFetch(0, nil,
+								`{"method":"POST","url":"http://moderation","body":{"query":"{queues {__typename ... on AppealQueue {flaggedUsers {__typename id} __typename} ... on ModerationQueue {flaggedUsers {__typename id} __typename __context_0: team {__typename}}}}"}}`,
+							)),
+							resolve.SingleWithPath(contextualEntityFetch(1, []int{0}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $a: String){_entities(representations: $representations){... on User {__typename teamTypeView(typeName: $a)}}}","variables":{"a":null,"representations":[$$0$$]}}}`,
+								contextualRepresentation("User"),
+							), "queues.@.flaggedUsers", resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ArrayPath("flaggedUsers"), []string{"AppealQueue"})),
+							resolve.SingleWithPath(contextualEntityFetch(2, []int{0}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: String){_entities(representations: $representations){... on User {__typename teamTypeView(typeName: $contextualArgument_0)}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+								contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_0", "__typename")),
+								contextualRepresentation("User"),
+							), "queues.@.flaggedUsers", resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ArrayPath("flaggedUsers"), []string{"ModerationQueue"})),
+						),
+						Data: &resolve.Object{
+							Fields: []*resolve.Field{
+								contextualField("queues", contextualList("queues", queue(usersOfBothTypes("teamTypeView")...))),
+							},
+						},
+					},
+				},
+				planConfiguration,
+				WithDefaultPostProcessor(),
+			)
+		})
+
+		t.Run("nested field owned by another subgraph is reused under two flattened levels", func(t *testing.T) {
+			teamNameFetch := func(fetchID int, path ...resolve.FetchItemPathElement) *resolve.FetchTreeNode {
+				return resolve.SingleWithPath(contextualEntityFetch(fetchID, []int{0}, true,
+					`{"method":"POST","url":"http://public","body":{"query":"query($representations: [_Any!]!){_entities(representations: $representations){... on Team {__typename name}}}","variables":{"representations":[$$0$$]}}}`,
+					contextualRepresentation("Team"),
+				), contextualResponsePath(path), path...)
+			}
+
+			RunWithPermutations(t, contextualArgumentsNestedSelectionDefinition, `
+				query TeamName {
+					queues {
+						subqueues {
+							flaggedUsers {
+								teamView
+							}
+						}
+					}
+				}`,
+				"TeamName",
+				&plan.SynchronousResponsePlan{
+					Response: &resolve.GraphQLResponse{
+						Fetches: resolve.Sequence(
+							resolve.Single(contextualFetch(0, nil,
+								`{"method":"POST","url":"http://moderation","body":{"query":"{queues {__typename ... on AppealQueue {subqueues {__typename ... on AppealQueue {flaggedUsers {__typename id} __typename} ... on ModerationQueue {flaggedUsers {__typename id} __typename __context_0: team {__typename id}}} __typename} ... on ModerationQueue {subqueues {__typename ... on AppealQueue {flaggedUsers {__typename id} __typename} ... on ModerationQueue {flaggedUsers {__typename id} __typename __context_0: team {__typename id}}} __typename __context_1: team {__typename id}}}}"}}`,
+							)),
+							resolve.SingleWithPath(contextualEntityFetch(1, []int{0}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $a: String){_entities(representations: $representations){... on User {__typename teamView(teamName: $a)}}}","variables":{"a":null,"representations":[$$0$$]}}}`,
+								contextualRepresentation("User"),
+							), "queues.@.subqueues.@.flaggedUsers", resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ArrayPath("subqueues"), []string{"AppealQueue"}), resolve.PathElementWithTypeNames(resolve.ArrayPath("flaggedUsers"), []string{"AppealQueue"})),
+							teamNameFetch(2, resolve.ArrayPath("queues"), resolve.ArrayPath("subqueues"), resolve.PathElementWithTypeNames(resolve.ObjectPath("__context_0"), []string{"ModerationQueue"})),
+							teamNameFetch(4, resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ObjectPath("__context_1"), []string{"ModerationQueue"})),
+							resolve.SingleWithPath(contextualEntityFetch(5, []int{0, 2}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: String){_entities(representations: $representations){... on User {__typename teamView(teamName: $contextualArgument_0)}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+								contextualVariable("contextualArgument_0", contextualStaticLevel(2, "ModerationQueue", "__context_0", "name")),
+								contextualRepresentation("User"),
+							), "queues.@.subqueues.@.flaggedUsers", resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ArrayPath("subqueues"), []string{"AppealQueue", "ModerationQueue"}), resolve.PathElementWithTypeNames(resolve.ArrayPath("flaggedUsers"), []string{"ModerationQueue"})),
+							resolve.SingleWithPath(contextualEntityFetch(6, []int{0, 4}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: String){_entities(representations: $representations){... on User {__typename teamView(teamName: $contextualArgument_0)}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+								contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_1", "name")),
+								contextualRepresentation("User"),
+							), "queues.@.subqueues.@.flaggedUsers", resolve.ArrayPath("queues"), resolve.PathElementWithTypeNames(resolve.ArrayPath("subqueues"), []string{"ModerationQueue"}), resolve.PathElementWithTypeNames(resolve.ArrayPath("flaggedUsers"), []string{"AppealQueue"})),
+						),
+						Data: &resolve.Object{
+							Fields: []*resolve.Field{
+								contextualField("queues", contextualList("queues", queue(
+									contextualField("subqueues", contextualList("subqueues", queue(usersOfBothTypes("teamView")...)), "AppealQueue"),
+									contextualField("subqueues", contextualList("subqueues", queue(usersOfBothTypes("teamView")...)), "ModerationQueue"),
+								))),
+							},
+						},
+					},
+				},
+				planConfiguration,
+				WithDefaultPostProcessor(),
+			)
+		})
+	})
+
 	t.Run("multi fetch", func(t *testing.T) {
 		planConfiguration := contextualArgumentsConfiguration(t)
 		planConfiguration.EnableMultiFetch = true
@@ -2771,6 +3208,128 @@ func TestGraphQLDataSourceFederation_ContextualArguments(t *testing.T) {
 	})
 }
 
+// contextualArgumentsPlanDroppingFactory registers its planners without the contextual argument plans of the path builder.
+type contextualArgumentsPlanDroppingFactory struct {
+	*Factory[Configuration]
+}
+
+func (f contextualArgumentsPlanDroppingFactory) Planner(logger abstractlogger.Logger) plan.DataSourcePlanner[Configuration] {
+	return contextualArgumentsPlanDroppingPlanner{f.Factory.Planner(logger).(*Planner[Configuration])}
+}
+
+type contextualArgumentsPlanDroppingPlanner struct {
+	*Planner[Configuration]
+}
+
+func (p contextualArgumentsPlanDroppingPlanner) Register(visitor *plan.Visitor, configuration plan.DataSourceConfiguration[Configuration], dataSourcePlannerConfiguration plan.DataSourcePlannerConfiguration) error {
+	dataSourcePlannerConfiguration.ContextualArguments = nil
+	return p.Planner.Register(visitor, configuration, dataSourcePlannerConfiguration)
+}
+
+// contextualArgumentsGuardConfiguration builds the same subgraph setter with the given planner factory, federation
+// setting and upstream profile field, to reach planning states that a composed configuration rules out.
+func contextualArgumentsGuardConfiguration(t *testing.T, factory plan.PlannerFactory[Configuration], federationEnabled bool, upstreamProfileField string) plan.Configuration {
+	usersSDL := `
+		type Query {
+			moderationQueue(id: ID!): ModerationQueue
+		}
+
+		type ModerationQueue @key(fields: "id") @context(name: "userScope") {
+			id: ID!
+			includeSuspended: Boolean!
+			flaggedUsers: [User!]!
+		}
+
+		type User @key(fields: "id") {
+			id: ID!
+			` + upstreamProfileField + `
+		}
+
+		type Profile {
+			displayName: String!
+		}
+	`
+
+	users, err := plan.NewDataSourceConfiguration[Configuration]("users", factory,
+		&plan.DataSourceMetadata{
+			RootNodes: []plan.TypeField{
+				{TypeName: "Query", FieldNames: []string{"moderationQueue"}},
+				{TypeName: "ModerationQueue", FieldNames: []string{"id", "includeSuspended", "flaggedUsers"}},
+				{TypeName: "User", FieldNames: []string{"id", "profile"}},
+			},
+			ChildNodes: []plan.TypeField{
+				{TypeName: "Profile", FieldNames: []string{"displayName"}},
+			},
+			FederationMetaData: plan.FederationMetaData{
+				Keys: plan.FederationFieldConfigurations{
+					{TypeName: "ModerationQueue", SelectionSet: "id"},
+					{TypeName: "User", SelectionSet: "id"},
+				},
+				ContextualArguments: plan.ContextualArgumentConfigurations{
+					{TypeName: "User", FieldName: "profile", ArgumentName: "includeSuspended", ContextName: "userScope", Setters: contextualArgumentsSetters("ModerationQueue")},
+				},
+			},
+		},
+		mustCustomConfiguration(t, ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: "http://users"},
+			SchemaConfiguration: mustSchema(t, &FederationConfiguration{Enabled: federationEnabled, ServiceSDL: usersSDL}, usersSDL),
+		}),
+	)
+	require.NoError(t, err)
+
+	return plan.Configuration{
+		DataSources:                  []plan.DataSource{users},
+		DisableResolveFieldPositions: true,
+		Fields: plan.FieldConfigurations{
+			{TypeName: "Query", FieldName: "moderationQueue", Arguments: plan.ArgumentsConfigurations{{Name: "id", SourceType: plan.FieldArgumentSource}}},
+			{TypeName: "User", FieldName: "profile", Arguments: plan.ArgumentsConfigurations{{Name: "includeSuspended", SourceType: plan.ContextualArgumentSource}}},
+		},
+	}
+}
+
+func contextualArgumentsPlanningError(t *testing.T, configuration plan.Configuration) string {
+	t.Helper()
+
+	definition := unsafeparser.ParseGraphqlDocumentString(contextualArgumentsSameSubgraphDefinition)
+	require.NoError(t, asttransform.MergeDefinitionWithBaseSchema(&definition))
+	operation := unsafeparser.ParseGraphqlDocumentString(`query Guard { moderationQueue(id: "q1") { flaggedUsers { profile { displayName } } } }`)
+
+	report := &operationreport.Report{}
+	astnormalization.NewWithOpts(
+		astnormalization.WithExtractVariables(),
+		astnormalization.WithInlineFragmentSpreads(),
+		astnormalization.WithRemoveFragmentDefinitions(),
+		astnormalization.WithRemoveUnusedVariables(),
+	).NormalizeOperation(&operation, &definition, report)
+	astvalidation.DefaultOperationValidator().Validate(&operation, &definition, report)
+	require.False(t, report.HasErrors(), report.Error())
+
+	planner, err := plan.NewPlanner(configuration)
+	require.NoError(t, err)
+	planner.Plan(&operation, &definition, "Guard", report)
+	require.True(t, report.HasErrors())
+	return report.Error()
+}
+
+func TestGraphQLDataSourceFederation_ContextualArgumentsPlanningGuards(t *testing.T) {
+	const profileField = `profile(includeSuspended: Boolean @fromContext(field: "$userScope { includeSuspended }")): Profile`
+
+	t.Run("a contextual argument without a plan stops planning", func(t *testing.T) {
+		configuration := contextualArgumentsGuardConfiguration(t, contextualArgumentsPlanDroppingFactory{&Factory[Configuration]{}}, true, profileField)
+		assert.Contains(t, contextualArgumentsPlanningError(t, configuration), "the contextual argument User.profile(includeSuspended:) was not planned")
+	})
+
+	t.Run("a captured argument outside an entity fetch stops planning", func(t *testing.T) {
+		configuration := contextualArgumentsGuardConfiguration(t, &Factory[Configuration]{}, false, profileField)
+		assert.Contains(t, contextualArgumentsPlanningError(t, configuration), "the contextual argument User.profile(includeSuspended:) is not planned in an entity fetch")
+	})
+
+	t.Run("an argument missing from the upstream schema stops planning", func(t *testing.T) {
+		configuration := contextualArgumentsGuardConfiguration(t, &Factory[Configuration]{}, true, `profile: Profile`)
+		assert.Contains(t, contextualArgumentsPlanningError(t, configuration), "the argument User.profile(includeSuspended:) is not defined in the upstream schema")
+	})
+}
+
 func contextualArgumentsBenchmarkConfiguration(b *testing.B, contextualFields int) (definition string, configuration plan.Configuration) {
 	var userFields, upstreamUserFields strings.Builder
 	for i := range 10 {
@@ -2819,7 +3378,20 @@ func contextualArgumentsBenchmarkConfiguration(b *testing.B, contextualFields in
 		})
 	}
 
-	moderation := mustDataSourceConfiguration(&testing.T{}, "moderation",
+	dataSource := func(id, url, sdl string, metadata *plan.DataSourceMetadata) plan.DataSource {
+		schemaConfiguration, err := NewSchemaConfiguration(sdl, &FederationConfiguration{Enabled: true, ServiceSDL: sdl})
+		require.NoError(b, err)
+		customConfiguration, err := NewConfiguration(ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: url},
+			SchemaConfiguration: schemaConfiguration,
+		})
+		require.NoError(b, err)
+		dataSourceConfiguration, err := plan.NewDataSourceConfiguration[Configuration](id, &Factory[Configuration]{}, metadata, customConfiguration)
+		require.NoError(b, err)
+		return dataSourceConfiguration
+	}
+
+	moderation := dataSource("moderation", "http://moderation", moderationSDL,
 		&plan.DataSourceMetadata{
 			RootNodes: []plan.TypeField{
 				{TypeName: "Query", FieldNames: []string{"moderationQueue"}},
@@ -2833,13 +3405,9 @@ func contextualArgumentsBenchmarkConfiguration(b *testing.B, contextualFields in
 				},
 			},
 		},
-		mustCustomConfiguration(&testing.T{}, ConfigurationInput{
-			Fetch:               &FetchConfiguration{URL: "http://moderation"},
-			SchemaConfiguration: mustSchema(&testing.T{}, &FederationConfiguration{Enabled: true, ServiceSDL: moderationSDL}, moderationSDL),
-		}),
 	)
 
-	users := mustDataSourceConfiguration(&testing.T{}, "users",
+	users := dataSource("users", "http://users", usersSDL,
 		&plan.DataSourceMetadata{
 			RootNodes: []plan.TypeField{
 				{TypeName: "ModerationQueue", FieldNames: []string{"id"}, ExternalFieldNames: []string{"includeSuspended"}},
@@ -2853,10 +3421,6 @@ func contextualArgumentsBenchmarkConfiguration(b *testing.B, contextualFields in
 				ContextualArguments: contextualArguments,
 			},
 		},
-		mustCustomConfiguration(&testing.T{}, ConfigurationInput{
-			Fetch:               &FetchConfiguration{URL: "http://users"},
-			SchemaConfiguration: mustSchema(&testing.T{}, &FederationConfiguration{Enabled: true, ServiceSDL: usersSDL}, usersSDL),
-		}),
 	)
 
 	return definition, plan.Configuration{
