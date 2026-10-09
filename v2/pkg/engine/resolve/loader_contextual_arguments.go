@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"golang.org/x/sync/errgroup"
 
@@ -23,6 +24,7 @@ const (
 const (
 	contextualArgumentGroupLimitExceeded = "the entities need %d requests for distinct contextual argument values, which exceeds the limit of %d"
 	contextualArgumentValueMissing       = "%d entities were not fetched because the context value of their '%s' ancestor is missing"
+	contextualArgumentValueMissingOne    = "1 entity was not fetched because the context value of its '%s' ancestor is missing"
 	contextualArgumentGroupsNotSent      = "%d requests for distinct contextual argument values were not sent because the operation was canceled or timed out"
 	contextualArgumentGroupsNotSentOne   = "1 request for distinct contextual argument values was not sent because the operation was canceled or timed out"
 )
@@ -63,9 +65,8 @@ func (l *Loader) prepareContextualArgumentFetch(fetchItem *FetchItem, captures [
 	res.tools = batchEntityToolPool.Get(len(items))
 
 	groups, excluded := groupContextualArgumentRuns(res.tools, runs, missing, len(captures))
-	if excluded.items != 0 {
-		err := l.renderContextualArgumentError(fetchItem, res, fmt.Sprintf(contextualArgumentValueMissing, excluded.items, excluded.typeName))
-		if err != nil {
+	if reason := contextualArgumentValueMissingReason(missing, excluded); reason != "" {
+		if err := l.renderContextualArgumentError(fetchItem, res, reason); err != nil {
 			return prepared, err
 		}
 	}
@@ -524,16 +525,13 @@ type contextualArgumentGroup struct {
 	spans  []batchItemSpan
 }
 
-// contextualArgumentExclusion counts the items whose nearest setter misses its value.
-type contextualArgumentExclusion struct {
-	items    int
-	typeName string
-}
-
 // groupContextualArgumentRuns groups the runs by their rendered values on the arena of tools: the hash narrows, the bytes decide.
-// Runs holding a missing value marker join no group.
-func groupContextualArgumentRuns(tools *batchEntityTools, runs []contextualArgumentRun, missing []*astjson.Value, captures int) ([]contextualArgumentGroup, contextualArgumentExclusion) {
-	var excluded contextualArgumentExclusion
+// Runs holding a missing value marker join no group; excluded counts their items per marker in missing.
+func groupContextualArgumentRuns(tools *batchEntityTools, runs []contextualArgumentRun, missing []*astjson.Value, captures int) ([]contextualArgumentGroup, []int) {
+	var excluded []int
+	if len(missing) != 0 {
+		excluded = arena.AllocateSlice[int](tools.a, len(missing), len(missing))
+	}
 	groups := arena.AllocateSlice[contextualArgumentGroup](tools.a, 0, 1)
 	bounds := arena.AllocateSlice[int](tools.a, 2*captures, 2*captures)
 	scratch := arena.AllocateSlice[byte](tools.a, 0, 64)
@@ -542,11 +540,8 @@ func groupContextualArgumentRuns(tools *batchEntityTools, runs []contextualArgum
 		span := batchItemSpan{start: start, end: runs[r].end}
 		start = runs[r].end
 		values := runs[r].values
-		if marker := missingContextualArgumentValue(values, missing); marker != nil {
-			if excluded.items == 0 {
-				excluded.typeName = string(marker.GetStringBytes())
-			}
-			excluded.items += span.end - span.start
+		if marker := missingContextualArgumentValue(values, missing); marker != -1 {
+			excluded[marker] += span.end - span.start
 			previous = -1
 			continue
 		}
@@ -585,17 +580,37 @@ func groupContextualArgumentRuns(tools *batchEntityTools, runs []contextualArgum
 	return groups, excluded
 }
 
-// missingContextualArgumentValue returns the missing value marker among values, or nil.
-func missingContextualArgumentValue(values, missing []*astjson.Value) *astjson.Value {
+// missingContextualArgumentValue returns the index in missing of the first missing value marker among values, or -1.
+func missingContextualArgumentValue(values, missing []*astjson.Value) int {
 	if len(missing) == 0 {
-		return nil
+		return -1
 	}
 	for _, value := range values {
-		if slices.Contains(missing, value) {
-			return value
+		if i := slices.Index(missing, value); i != -1 {
+			return i
 		}
 	}
-	return nil
+	return -1
+}
+
+// contextualArgumentValueMissingReason names every setter type whose value is missing with the number of entities it excludes.
+func contextualArgumentValueMissingReason(missing []*astjson.Value, excluded []int) string {
+	var reason strings.Builder
+	for i, count := range excluded {
+		if count == 0 {
+			continue
+		}
+		if reason.Len() != 0 {
+			reason.WriteString("; ")
+		}
+		typeName := unsafebytes.BytesToString(missing[i].GetStringBytes())
+		if count == 1 {
+			fmt.Fprintf(&reason, contextualArgumentValueMissingOne, typeName)
+		} else {
+			fmt.Fprintf(&reason, contextualArgumentValueMissing, count, typeName)
+		}
+	}
+	return reason.String()
 }
 
 // appendContextualArgumentTuple renders values as a JSON array and records where each value starts and ends in bounds.

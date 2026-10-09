@@ -350,7 +350,37 @@ func TestContextualArgumentCapture(t *testing.T) {
 		out := loadContextual(t, NewContext(t.Context()), data, flaggedUsersFetch(contextualUsersFetch(1, users, capture)))
 
 		assert.ElementsMatch(t, []string{contextualUsersRequest(`,"contextualArgument_0":["u1",null,"u2"]`, "u1")}, users.recordedRequests())
-		assert.Contains(t, out, `Reason: 1 entities were not fetched because the context value of their 'ModerationQueue' ancestor is missing.`)
+		assert.Contains(t, out, `Reason: 1 entity was not fetched because the context value of its 'ModerationQueue' ancestor is missing.`)
+	})
+
+	t.Run("missing values of several setter types are counted per type", func(t *testing.T) {
+		capture := ContextualArgumentCapture{
+			VariableName: "contextualArgument_0",
+			Levels: []ContextualArgumentLevel{{Depth: 1, MatchByTypename: true, Setters: []ContextualArgumentSetter{
+				{TypeName: "ModerationQueue", Path: []string{"__context_0"}},
+				{TypeName: "AppealQueue", Path: []string{"__context_1"}},
+			}}},
+		}
+		users := newContextualUsersDataSource("contextualArgument_0")
+		data := `{"moderationQueues":[` +
+			`{"__typename":"AppealQueue","flaggedUsers":[{"__typename":"User","id":"u0"}]},` +
+			`{"__typename":"ModerationQueue","flaggedUsers":[{"__typename":"User","id":"u1"}]},` +
+			`{"__typename":"ModerationQueue","__context_0":true,"flaggedUsers":[{"__typename":"User","id":"u2"}]},` +
+			`{"__typename":"ModerationQueue","flaggedUsers":[{"__typename":"User","id":"u3"},{"__typename":"User","id":"u4"}]},` +
+			`{"__typename":"AppealQueue","flaggedUsers":[{"__typename":"User","id":"u5"}]}]}`
+
+		out := loadContextual(t, NewContext(t.Context()), data, flaggedUsersFetch(contextualUsersFetch(1, users, capture)))
+
+		assert.Equal(t, []string{contextualUsersRequest(`,"contextualArgument_0":true`, "u2")}, users.recordedRequests())
+		assert.Equal(t, `{"errors":[{"message":"Failed to fetch from Subgraph 'users' at Path 'moderationQueues.@.flaggedUsers', Reason: `+
+			`2 entities were not fetched because the context value of their 'AppealQueue' ancestor is missing; `+
+			`3 entities were not fetched because the context value of their 'ModerationQueue' ancestor is missing."}],`+
+			`"data":{"moderationQueues":[`+
+			`{"__typename":"AppealQueue","flaggedUsers":[{"__typename":"User","id":"u0"}]},`+
+			`{"__typename":"ModerationQueue","flaggedUsers":[{"__typename":"User","id":"u1"}]},`+
+			`{"__typename":"ModerationQueue","__context_0":true,"flaggedUsers":[{"__typename":"User","id":"u2","profile":"u2:true"}]},`+
+			`{"__typename":"ModerationQueue","flaggedUsers":[{"__typename":"User","id":"u3"},{"__typename":"User","id":"u4"}]},`+
+			`{"__typename":"AppealQueue","flaggedUsers":[{"__typename":"User","id":"u5"}]}]}}`, out)
 	})
 
 	t.Run("two contextual arguments group by their tuple of values", func(t *testing.T) {
