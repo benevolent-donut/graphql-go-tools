@@ -3378,7 +3378,20 @@ func contextualArgumentsBenchmarkConfiguration(b *testing.B, contextualFields in
 		})
 	}
 
-	moderation := mustDataSourceConfiguration(&testing.T{}, "moderation",
+	dataSource := func(id, url, sdl string, metadata *plan.DataSourceMetadata) plan.DataSource {
+		schemaConfiguration, err := NewSchemaConfiguration(sdl, &FederationConfiguration{Enabled: true, ServiceSDL: sdl})
+		require.NoError(b, err)
+		customConfiguration, err := NewConfiguration(ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: url},
+			SchemaConfiguration: schemaConfiguration,
+		})
+		require.NoError(b, err)
+		dataSourceConfiguration, err := plan.NewDataSourceConfiguration[Configuration](id, &Factory[Configuration]{}, metadata, customConfiguration)
+		require.NoError(b, err)
+		return dataSourceConfiguration
+	}
+
+	moderation := dataSource("moderation", "http://moderation", moderationSDL,
 		&plan.DataSourceMetadata{
 			RootNodes: []plan.TypeField{
 				{TypeName: "Query", FieldNames: []string{"moderationQueue"}},
@@ -3392,13 +3405,9 @@ func contextualArgumentsBenchmarkConfiguration(b *testing.B, contextualFields in
 				},
 			},
 		},
-		mustCustomConfiguration(&testing.T{}, ConfigurationInput{
-			Fetch:               &FetchConfiguration{URL: "http://moderation"},
-			SchemaConfiguration: mustSchema(&testing.T{}, &FederationConfiguration{Enabled: true, ServiceSDL: moderationSDL}, moderationSDL),
-		}),
 	)
 
-	users := mustDataSourceConfiguration(&testing.T{}, "users",
+	users := dataSource("users", "http://users", usersSDL,
 		&plan.DataSourceMetadata{
 			RootNodes: []plan.TypeField{
 				{TypeName: "ModerationQueue", FieldNames: []string{"id"}, ExternalFieldNames: []string{"includeSuspended"}},
@@ -3412,10 +3421,6 @@ func contextualArgumentsBenchmarkConfiguration(b *testing.B, contextualFields in
 				ContextualArguments: contextualArguments,
 			},
 		},
-		mustCustomConfiguration(&testing.T{}, ConfigurationInput{
-			Fetch:               &FetchConfiguration{URL: "http://users"},
-			SchemaConfiguration: mustSchema(&testing.T{}, &FederationConfiguration{Enabled: true, ServiceSDL: usersSDL}, usersSDL),
-		}),
 	)
 
 	return definition, plan.Configuration{
