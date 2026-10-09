@@ -597,24 +597,7 @@ func TestContextualArgumentGrouping(t *testing.T) {
 		assert.Contains(t, out, `{"__typename":"User","id":"u4","profile":"u4:true"}`)
 		assert.Contains(t, out, `{"__context_0":false,"flaggedUsers":[{"__typename":"User","id":"u2"},{"__typename":"User","id":"u3"}]}`)
 	})
-}
 
-// failingContextualDataSource fails the requests whose input contains failWhen.
-type failingContextualDataSource struct {
-	DataSource
-
-	failWhen string
-}
-
-func (f *failingContextualDataSource) Load(ctx context.Context, headers http.Header, input []byte) ([]byte, error) {
-	data, err := f.DataSource.Load(ctx, headers, input)
-	if strings.Contains(string(input), f.failWhen) {
-		return nil, errors.New("subgraph unavailable")
-	}
-	return data, err
-}
-
-func TestContextualArgumentGroupLimit(t *testing.T) {
 	t.Run("over the group limit returns an error and sends nothing", func(t *testing.T) {
 		users := newContextualUsersDataSource("contextualArgument_0")
 		dependent := newContextualUsersDataSource()
@@ -650,9 +633,7 @@ func TestContextualArgumentGroupLimit(t *testing.T) {
 		assert.Empty(t, users.recordedRequests())
 		assert.Contains(t, out, `Reason: the entities need 101 requests for distinct contextual argument values, which exceeds the limit of 100.`)
 	})
-}
 
-func TestContextualArgumentRateLimit(t *testing.T) {
 	t.Run("rate limiter is called once for three groups", func(t *testing.T) {
 		limiter := &testRateLimiter{allowFn: func(*Context, *FetchInfo, json.RawMessage) (*RateLimitDeny, error) { return nil, nil }}
 		ctx := NewContext(t.Context())
@@ -682,6 +663,21 @@ func TestContextualArgumentRateLimit(t *testing.T) {
 		assert.Equal(t, 1, strings.Count(out, `"message"`))
 		assert.Contains(t, out, `{"errors":[{"message":"Rate limit exceeded for Subgraph 'users' at Path 'moderationQueues.@.flaggedUsers', Reason: rate limit exceeded."}]`)
 	})
+}
+
+// failingContextualDataSource fails the requests whose input contains failWhen.
+type failingContextualDataSource struct {
+	DataSource
+
+	failWhen string
+}
+
+func (f *failingContextualDataSource) Load(ctx context.Context, headers http.Header, input []byte) ([]byte, error) {
+	data, err := f.DataSource.Load(ctx, headers, input)
+	if strings.Contains(string(input), f.failWhen) {
+		return nil, errors.New("subgraph unavailable")
+	}
+	return data, err
 }
 
 func TestContextualArgumentHooksAndTraces(t *testing.T) {
