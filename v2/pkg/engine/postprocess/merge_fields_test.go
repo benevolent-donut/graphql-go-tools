@@ -227,6 +227,75 @@ func TestMergeFields_Process(t *testing.T) {
 		},
 	))
 
+	t.Run("merge type conditioned fields of a nested list", runTest(
+		&resolve.Object{
+			Fields: []*resolve.Field{
+				{
+					Name: []byte(`pages`),
+					Value: &resolve.Array{
+						Item: &resolve.Array{
+							Item: &resolve.Object{
+								Fields: []*resolve.Field{
+									{
+										Name:  []byte(`id`),
+										Value: &resolve.String{},
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Name: []byte(`pages`),
+					Value: &resolve.Array{
+						Item: &resolve.Array{
+							Item: &resolve.Object{
+								Fields: []*resolve.Field{
+									{
+										Name:  []byte(`name`),
+										Value: &resolve.String{},
+									},
+								},
+							},
+						},
+					},
+					OnTypeNames: [][]byte{
+						[]byte(`Queue`),
+					},
+				},
+			},
+		},
+		&resolve.Object{
+			Fields: []*resolve.Field{
+				{
+					Name: []byte(`pages`),
+					Value: &resolve.Array{
+						Item: &resolve.Array{
+							Item: &resolve.Object{
+								Fields: []*resolve.Field{
+									{
+										Name:  []byte(`id`),
+										Value: &resolve.String{},
+									},
+									{
+										Name:  []byte(`name`),
+										Value: &resolve.String{},
+										ParentOnTypeNames: []resolve.ParentOnTypeNames{
+											{
+												Depth: 1,
+												Names: [][]byte{[]byte(`Queue`)},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	))
+
 	t.Run("merge fields at the end of an object nested reverse", runTest(
 		&resolve.Object{
 			Fields: []*resolve.Field{

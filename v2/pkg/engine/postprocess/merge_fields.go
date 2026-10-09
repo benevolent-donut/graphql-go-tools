@@ -243,10 +243,13 @@ func (m *mergeFields) mergeValues(left, right *resolve.Field) {
 		r := right.Value.(*resolve.Object)
 		l.Fields = append(l.Fields, r.Fields...)
 	case *resolve.Array:
-		r := right.Value.(*resolve.Array)
-		if l.Item.NodeKind() == resolve.NodeKindObject {
-			lo := l.Item.(*resolve.Object)
-			ro := r.Item.(*resolve.Object)
+		li, ri := l.Item, right.Value.(*resolve.Array).Item
+		for li.NodeKind() == resolve.NodeKindArray {
+			li, ri = li.(*resolve.Array).Item, ri.(*resolve.Array).Item
+		}
+		if li.NodeKind() == resolve.NodeKindObject {
+			lo := li.(*resolve.Object)
+			ro := ri.(*resolve.Object)
 			lo.Fields = append(lo.Fields, ro.Fields...)
 		}
 	}
@@ -281,9 +284,12 @@ func (m *mergeFields) setParentTypeNames(field *resolve.Field, typeNames [][]byt
 			m.setParentTypeNames(object.Fields[i], typeNames, depth+1)
 		}
 	case resolve.NodeKindArray:
-		array := field.Value.(*resolve.Array)
-		if array.Item.NodeKind() == resolve.NodeKindObject {
-			object := array.Item.(*resolve.Object)
+		item := field.Value.(*resolve.Array).Item
+		for item.NodeKind() == resolve.NodeKindArray {
+			item = item.(*resolve.Array).Item
+		}
+		if item.NodeKind() == resolve.NodeKindObject {
+			object := item.(*resolve.Object)
 			for i := range object.Fields {
 				object.Fields[i].ParentOnTypeNames = append(object.Fields[i].ParentOnTypeNames, resolve.ParentOnTypeNames{
 					Depth: depth,
