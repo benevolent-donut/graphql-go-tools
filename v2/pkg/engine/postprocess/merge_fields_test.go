@@ -273,4 +273,89 @@ func TestMergeFields_Process(t *testing.T) {
 			},
 		},
 	))
+
+	t.Run("scalar fields of different defer scopes stay apart", runTest(
+		&resolve.Object{
+			Fields: []*resolve.Field{
+				{
+					Name: []byte(`a`),
+					Value: &resolve.Object{
+						Fields: []*resolve.Field{
+							{
+								Name:  []byte(`id`),
+								Value: &resolve.String{},
+								Defer: &resolve.DeferField{DeferID: 1},
+							},
+						},
+					},
+				},
+				{
+					Name: []byte(`a`),
+					Value: &resolve.Object{
+						Fields: []*resolve.Field{
+							{
+								Name:  []byte(`b`),
+								Value: &resolve.Integer{},
+							},
+						},
+					},
+					OnTypeNames: [][]byte{
+						[]byte(`A`),
+					},
+				},
+				{
+					Name: []byte(`a`),
+					Value: &resolve.Object{
+						Fields: []*resolve.Field{
+							{
+								Name:  []byte(`b`),
+								Value: &resolve.Integer{},
+								Defer: &resolve.DeferField{DeferID: 2},
+							},
+						},
+					},
+					OnTypeNames: [][]byte{
+						[]byte(`B`),
+					},
+				},
+			},
+		},
+		&resolve.Object{
+			Fields: []*resolve.Field{
+				{
+					Name: []byte(`a`),
+					Value: &resolve.Object{
+						Fields: []*resolve.Field{
+							{
+								Name:  []byte(`id`),
+								Value: &resolve.String{},
+								Defer: &resolve.DeferField{DeferID: 1},
+							},
+							{
+								Name:  []byte(`b`),
+								Value: &resolve.Integer{},
+								ParentOnTypeNames: []resolve.ParentOnTypeNames{
+									{
+										Depth: 1,
+										Names: [][]byte{[]byte(`A`)},
+									},
+								},
+							},
+							{
+								Name:  []byte(`b`),
+								Value: &resolve.Integer{},
+								Defer: &resolve.DeferField{DeferID: 2},
+								ParentOnTypeNames: []resolve.ParentOnTypeNames{
+									{
+										Depth: 1,
+										Names: [][]byte{[]byte(`B`)},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	))
 }
