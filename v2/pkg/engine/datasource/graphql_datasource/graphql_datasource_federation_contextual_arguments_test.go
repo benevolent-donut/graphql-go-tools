@@ -682,6 +682,125 @@ func contextualArgumentsSameSubgraphConfiguration(t *testing.T) plan.Configurati
 	}
 }
 
+const contextualArgumentsNestedExternalKeyDefinition = `
+	type Query {
+		moderationQueue(id: ID!): ModerationQueue
+		organization: Organization
+	}
+
+	type ModerationQueue {
+		id: ID!
+		includeSuspended: Boolean!
+		flaggedUsers: [User!]!
+	}
+
+	type User {
+		id: ID!
+		organization: Organization!
+		profile: Profile
+	}
+
+	type Organization {
+		code: ID!
+	}
+
+	type Profile {
+		displayName: String!
+	}
+`
+
+// contextualArgumentsNestedExternalKeyConfiguration declares a User key with an external nested field before the id
+// key; accounts resolves that field only below Query.organization, so users cannot obtain it for flagged users.
+func contextualArgumentsNestedExternalKeyConfiguration(t *testing.T) plan.Configuration {
+	accountsSDL := `
+		type Query {
+			organization: Organization
+		}
+
+		type Organization {
+			code: ID!
+		}
+	`
+
+	usersSDL := `
+		type Query {
+			moderationQueue(id: ID!): ModerationQueue
+		}
+
+		type ModerationQueue @key(fields: "id") @context(name: "userScope") {
+			id: ID!
+			includeSuspended: Boolean!
+			flaggedUsers: [User!]!
+		}
+
+		type User @key(fields: "organization { code }") @key(fields: "id") {
+			id: ID!
+			organization: Organization!
+			profile(includeSuspended: Boolean @fromContext(field: "$userScope { includeSuspended }")): Profile
+		}
+
+		type Organization {
+			code: ID! @external
+		}
+
+		type Profile {
+			displayName: String!
+		}
+	`
+
+	accounts := mustDataSourceConfiguration(t, "accounts",
+		&plan.DataSourceMetadata{
+			RootNodes: []plan.TypeField{
+				{TypeName: "Query", FieldNames: []string{"organization"}},
+			},
+			ChildNodes: []plan.TypeField{
+				{TypeName: "Organization", FieldNames: []string{"code"}},
+			},
+		},
+		mustCustomConfiguration(t, ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: "http://accounts"},
+			SchemaConfiguration: mustSchema(t, &FederationConfiguration{Enabled: true, ServiceSDL: accountsSDL}, accountsSDL),
+		}),
+	)
+
+	users := mustDataSourceConfiguration(t, "users",
+		&plan.DataSourceMetadata{
+			RootNodes: []plan.TypeField{
+				{TypeName: "Query", FieldNames: []string{"moderationQueue"}},
+				{TypeName: "ModerationQueue", FieldNames: []string{"id", "includeSuspended", "flaggedUsers"}},
+				{TypeName: "User", FieldNames: []string{"id", "organization", "profile"}},
+			},
+			ChildNodes: []plan.TypeField{
+				{TypeName: "Organization", ExternalFieldNames: []string{"code"}},
+				{TypeName: "Profile", FieldNames: []string{"displayName"}},
+			},
+			FederationMetaData: plan.FederationMetaData{
+				Keys: plan.FederationFieldConfigurations{
+					{TypeName: "ModerationQueue", SelectionSet: "id"},
+					{TypeName: "User", SelectionSet: "organization { code }"},
+					{TypeName: "User", SelectionSet: "id"},
+				},
+				ContextualArguments: plan.ContextualArgumentConfigurations{
+					{TypeName: "User", FieldName: "profile", ArgumentName: "includeSuspended", ContextName: "userScope", Setters: contextualArgumentsSetters("ModerationQueue")},
+				},
+			},
+		},
+		mustCustomConfiguration(t, ConfigurationInput{
+			Fetch:               &FetchConfiguration{URL: "http://users"},
+			SchemaConfiguration: mustSchema(t, &FederationConfiguration{Enabled: true, ServiceSDL: usersSDL}, usersSDL),
+		}),
+	)
+
+	return plan.Configuration{
+		DataSources:                  []plan.DataSource{accounts, users},
+		DisableResolveFieldPositions: true,
+		Fields: plan.FieldConfigurations{
+			{TypeName: "Query", FieldName: "moderationQueue", Arguments: plan.ArgumentsConfigurations{{Name: "id", SourceType: plan.FieldArgumentSource}}},
+			{TypeName: "User", FieldName: "profile", Arguments: plan.ArgumentsConfigurations{{Name: "includeSuspended", SourceType: plan.ContextualArgumentSource}}},
+		},
+	}
+}
+
 const contextualArgumentsContributedImplementationDefinition = `
 	type Query {
 		queues: [Queue!]!
@@ -1413,6 +1532,49 @@ func TestGraphQLDataSourceFederation_ContextualArguments(t *testing.T) {
 					},
 				},
 				planConfiguration,
+				WithDefaultPostProcessor(),
+			)
+		})
+
+		t.Run("entity fetch skips a key with an external nested field declared before a local key", func(t *testing.T) {
+			RunWithPermutations(t, contextualArgumentsNestedExternalKeyDefinition, `
+				query NestedExternalKey {
+					moderationQueue(id: "q1") {
+						flaggedUsers {
+							id
+							profile {
+								displayName
+							}
+						}
+					}
+				}`,
+				"NestedExternalKey",
+				&plan.SynchronousResponsePlan{
+					Response: &resolve.GraphQLResponse{
+						Fetches: resolve.Sequence(
+							resolve.Single(contextualFetch(0, nil,
+								`{"method":"POST","url":"http://users","body":{"query":"query($a: ID!){moderationQueue(id: $a){flaggedUsers {id __typename} __context_0: includeSuspended}}","variables":{"a":$$0$$}}}`,
+								contextualClientVariable("a"),
+							)),
+							resolve.SingleWithPath(contextualEntityFetch(1, []int{0}, true,
+								`{"method":"POST","url":"http://users","body":{"query":"query($representations: [_Any!]!, $contextualArgument_0: Boolean){_entities(representations: $representations){... on User {__typename profile(includeSuspended: $contextualArgument_0){displayName}}}}","variables":{"representations":[$$1$$],"contextualArgument_0":$$0$$}}}`,
+								contextualVariable("contextualArgument_0", contextualStaticLevel(1, "ModerationQueue", "__context_0")),
+								contextualRepresentation("User"),
+							), "moderationQueue.flaggedUsers", resolve.ObjectPath("moderationQueue"), resolve.ArrayPath("flaggedUsers")),
+						),
+						Data: &resolve.Object{
+							Fields: []*resolve.Field{
+								contextualField("moderationQueue", contextualQueue("moderationQueue", true,
+									contextualField("flaggedUsers", contextualUsers("flaggedUsers",
+										contextualField("id", &resolve.Scalar{Path: []string{"id"}}),
+										contextualProfile(),
+									)),
+								)),
+							},
+						},
+					},
+				},
+				contextualArgumentsNestedExternalKeyConfiguration(t),
 				WithDefaultPostProcessor(),
 			)
 		})
